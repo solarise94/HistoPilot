@@ -560,9 +560,28 @@ def api_share_create():
             return jsonify(error=f"切片不存在: {name}"), 400
         clean.append(safe)
 
-    share = share_store.create_share(clean, expires_hours)
+    # roi_sizes 可选：未传或 None 用默认；数组则逐元素校验（6/6.5/6.0/6.5）
+    roi_sizes = body.get("roi_sizes")
+    if roi_sizes is not None:
+        if not isinstance(roi_sizes, list):
+            return jsonify(error="roi_sizes 需为数组"), 400
+        for s in roi_sizes:
+            if isinstance(s, bool) or not isinstance(s, (int, float)):
+                return jsonify(error="roi_sizes 元素需为 6 或 6.5"), 400
+            if float(s) not in share_store.ALLOWED_ROI_SIZES:
+                return jsonify(error="roi_sizes 仅允许 6 或 6.5"), 400
+
+    try:
+        share = share_store.create_share(clean, expires_hours, roi_sizes=roi_sizes)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
     url = SHARE_BASE_URL + "/s/" + share["token"]
-    return jsonify(token=share["token"], url=url, expires_at=share["expires_at"])
+    return jsonify(
+        token=share["token"],
+        url=url,
+        expires_at=share["expires_at"],
+        roi_sizes=share.get("roi_sizes", list(share_store.DEFAULT_ROI_SIZES)),
+    )
 
 
 @app.route("/api/share/list")

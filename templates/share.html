@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>病理切片查看</title>
-  <link rel="stylesheet" href="/static/share.css?v=20260731a" />
+  <link rel="stylesheet" href="/static/share.css?v=20260731b" />
   <!-- OpenSeadragon 5.0.1（已本地化） -->
   <script src="/static/openseadragon.min.js"></script>
 </head>
@@ -32,6 +32,7 @@
         <button id="zoom-in" class="icon-btn" title="放大" aria-label="放大">+</button>
       </div>
       <button id="rotate-btn" class="icon-btn" title="顺时针旋转 90°" aria-label="旋转">↻</button>
+      <button id="flip-btn" class="icon-btn" title="水平翻转（镜像）" aria-label="镜像">⇋</button>
 
       <!-- ROI 分段控件（macOS 分段样式） -->
       <div class="seg-control roi-group" role="group" aria-label="ROI 分段">
@@ -96,6 +97,6 @@
   <script>
     window.__SHARE_TOKEN__ = "{{ token }}";
   </script>
-  <script src="/static/share.js?v=20260731a"></script>
+  <script src="/static/share.js?v=20260731b"></script>
 </body>
 </html>

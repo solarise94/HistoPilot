@@ -233,6 +233,12 @@ button {
 
 /* ROI 激活态（兼容旧 .roi-btn.active 引用） */
 .roi-btn.active { color: var(--accent); }
+/* ROI 分段禁用态（本次分享不允许该尺寸） */
+.seg-control .seg.disabled,
+.roi-btn.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 
 /* "显示全部标记" 激活态：accent 描边底 */
 .tool-btn.active {
@@ -817,6 +823,7 @@ button {
   pointer-events: none;
   z-index: 0;
   image-rendering: auto;
+  transform-origin: center;
 }
 
 /* 拖拽上传遮罩 */

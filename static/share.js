@@ -21,8 +21,10 @@
     roiMode: null,
     roi: { x: 0, y: 0, side: 0 },
     rotation: 0,
+    flipped: false,      // 是否水平翻转（镜像）
     drawMode: null,      // null | "arrow" | "freehand"（与 roiMode 互斥）
     showAnno: true,      // 默认始终显示（用户需要看到管理员标记）
+    roiSizes: [6, 6.5],  // 本次分享允许的矩形标记尺寸（fetch config 后填充）
   };
 
   var viewer = null;
@@ -42,6 +44,7 @@
     zoomIn: $("zoom-in"),
     zoomOut: $("zoom-out"),
     rotateBtn: $("rotate-btn"),
+    flipBtn: $("flip-btn"),
     roi6: $("roi-6"),
     roi65: $("roi-6-5"),
     saveRoiBtn: $("save-roi-btn"),
@@ -147,6 +150,14 @@
     // 底图随平移/缩放实时跟随（animation 每帧触发，跟随最平滑）
     viewer.addHandler("animation", function () { syncBaseThumb(); redrawAnnoCanvas(); });
     viewer.addHandler("rotate", function () { syncBaseThumb(); redrawAnnoCanvas(); });
+    // 镜像翻转：OSD 'flip' 事件 → 同步底图 transform / 重绘标注画布 / ROI 框重对位
+    viewer.addHandler("flip", function () {
+      state.flipped = !!viewer.viewport.getFlip();
+      applyBaseThumbFlip();
+      syncBaseThumb();
+      redrawAnnoCanvas();
+      updateRoiOverlay();
+    });
     viewer.addHandler("resize", redrawAnnoCanvas);
     // 切片关闭时清理旧底图
     viewer.addHandler("close", clearBaseThumb);
@@ -194,6 +205,43 @@
     els.invalidMask.style.display = "flex";
   }
 
+  // 拉取本次分享配置（矩形标记允许尺寸），再据此渲染工具栏按钮可用性
+  function loadConfig() {
+    return fetch(API + "/api/config")
+      .then(function (r) {
+        if (!r.ok) throw new Error("config " + r.status);
+        return r.json();
+      })
+      .then(function (cfg) {
+        var sizes = cfg && cfg.roi_sizes;
+        if (sizes && sizes.length) {
+          state.roiSizes = sizes.map(function (s) { return Number(s); });
+        }
+      })
+      .catch(function () {
+        // 失败时保持默认（两者皆可）
+      })
+      .then(function () { applyRoiSizeRestriction(); });
+  }
+
+  // 根据允许尺寸禁用/启用 ROI 分段按钮；若当前 roiMode 被禁则退出 ROI
+  function applyRoiSizeRestriction() {
+    var allowed = {};
+    state.roiSizes.forEach(function (s) { allowed[Number(s)] = true; });
+    function setBtn(btn, sizeKey) {
+      var ok = !!allowed[sizeKey];
+      btn.disabled = !ok;
+      btn.title = ok ? "" : "本次分享不允许该尺寸";
+      btn.classList.toggle("disabled", !ok);
+    }
+    setBtn(els.roi6, 6);
+    setBtn(els.roi65, 6.5);
+    // 若当前 roiMode 被禁则退出 ROI 模式
+    if (state.roiMode != null && !allowed[state.roiMode]) {
+      exitRoi();
+    }
+  }
+
   function renderChips() {
     if (state.slides.length <= 1) {
       els.slideChips.style.display = "none";
@@ -217,6 +265,12 @@
   }
 
   // ---------- 底图缩略图层（慢网下瓦片未到区域的模糊预览） ----------
+  function applyBaseThumbFlip() {
+    if (!baseThumbEl) return;
+    baseThumbEl.style.transformOrigin = "center";
+    baseThumbEl.style.transform = state.flipped ? "scaleX(-1)" : "";
+  }
+
   function clearBaseThumb() {
     if (baseThumbEl) {
       if (baseThumbEl.parentNode) baseThumbEl.parentNode.removeChild(baseThumbEl);
@@ -286,6 +340,7 @@
     baseThumbEl.src = API + "/api/slide/" + encodeURIComponent(name) + "/thumbnail";
     baseThumbEl.alt = "";
     viewer.container.insertBefore(baseThumbEl, viewer.canvas);
+    applyBaseThumbFlip();
 
     viewer.open(API + "/api/slide/" + encodeURIComponent(name) + ".dzi");
   }
@@ -320,10 +375,24 @@
     updateRoiOverlay();
     redrawAnnoCanvas();
   }
+  function flip() {
+    if (!viewer || !viewer.viewport || !viewer.viewport.toggleFlip) return;
+    viewer.viewport.toggleFlip();
+    // 'flip' 事件负责同步 state/各层；toggleFlip 可能未触发事件时兜底
+    state.flipped = !!viewer.viewport.getFlip();
+    applyBaseThumbFlip();
+    syncBaseThumb();
+    redrawAnnoCanvas();
+    updateRoiOverlay();
+  }
   function reset() {
     if (!viewer || !viewer.viewport) return;
     state.rotation = 0;
     viewer.viewport.setRotation(0);
+    // 复位时取消镜像（回到默认朝向）
+    if (viewer.viewport.getFlip && viewer.viewport.getFlip()) {
+      viewer.viewport.toggleFlip();
+    }
     viewer.viewport.goHome(true);
   }
 
@@ -335,6 +404,13 @@
 
   function toggleRoi(sizeMm) {
     if (!state.slide) { toast("请先打开一个切片", "error"); return; }
+    // 本次分享不允许该尺寸 → 直接拒绝（按钮亦为禁用态）
+    var allowed = {};
+    state.roiSizes.forEach(function (s) { allowed[Number(s)] = true; });
+    if (!allowed[Number(sizeMm)]) {
+      toast("本次分享不允许 " + sizeMm + "mm 标记", "info");
+      return;
+    }
     if (!state.mppX || state.mppX <= 0) {
       toast("缺少 mpp（µm/px），请先在工具栏设置 mpp", "error");
       return;
@@ -1068,6 +1144,7 @@
     els.zoomIn.addEventListener("click", zoomIn);
     els.zoomOut.addEventListener("click", zoomOut);
     els.rotateBtn.addEventListener("click", rotate);
+    els.flipBtn.addEventListener("click", flip);
     els.resetBtn.addEventListener("click", reset);
 
     els.roi6.addEventListener("click", function () { toggleRoi(6); });
@@ -1121,7 +1198,10 @@
   function init() {
     initViewer();
     bindEvents();
-    loadSlides();
+    // 先拉取分享配置（允许的 ROI 尺寸）再加载切片，确保工具栏按钮状态正确
+    loadConfig().then(function () {
+      loadSlides();
+    });
     loadRoiPanel();
   }
 

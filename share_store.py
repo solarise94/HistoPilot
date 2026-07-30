@@ -30,8 +30,54 @@ _EMPTY = {"shares": {}, "rois": [], "projects": {}, "slide_meta": {}}
 # 支持的标注类型
 ROI_TYPES = ("rect", "arrow", "freehand")
 
+# 分享可选的 ROI 矩形标记尺寸（mm），以 float 存储为子集
+ALLOWED_ROI_SIZES = (6.0, 6.5)
+# 默认标记尺寸子集（未指定时）
+DEFAULT_ROI_SIZES = [6.0, 6.5]
+
 # 管理员标注使用的固定 token
 ADMIN_TOKEN = "admin"
+
+
+def _normalize_roi_sizes(roi_sizes):
+    """校验并归一化 roi_sizes：统一转 float，去重保序，且必须是
+    ALLOWED_ROI_SIZES 的子集。返回 list[float]；非法抛 ValueError。
+    None 时返回 DEFAULT_ROI_SIZES 的副本。
+    """
+    if roi_sizes is None:
+        return list(DEFAULT_ROI_SIZES)
+    if not isinstance(roi_sizes, (list, tuple)):
+        raise ValueError("roi_sizes 需为数组")
+    allowed = set(ALLOWED_ROI_SIZES)
+    out = []
+    seen = set()
+    for s in roi_sizes:
+        if isinstance(s, bool) or not isinstance(s, (int, float)):
+            raise ValueError("roi_sizes 元素需为数值")
+        import math
+        if not math.isfinite(float(s)):
+            raise ValueError("roi_sizes 元素需为有限数值")
+        v = float(s)
+        if v not in allowed:
+            raise ValueError("roi_sizes 仅允许 6 或 6.5")
+        if v not in seen:
+            seen.add(v)
+            out.append(v)
+    if not out:
+        raise ValueError("roi_sizes 不能为空")
+    return out
+
+
+def _share_roi_sizes(share):
+    """从 share dict 读取归一化的 roi_sizes；旧分享无该字段时返回默认。"""
+    rs = share.get("roi_sizes") if isinstance(share, dict) else None
+    if not isinstance(rs, list) or not rs:
+        return list(DEFAULT_ROI_SIZES)
+    # 兜底过滤：脏数据（非数字/越界）统一回默认
+    try:
+        return _normalize_roi_sizes(rs)
+    except ValueError:
+        return list(DEFAULT_ROI_SIZES)
 
 
 def _is_finite_num(v):
@@ -115,8 +161,13 @@ def _with_lock(mode, fn):
 # --------------------------------------------------------------------------- #
 # 公共 API
 # --------------------------------------------------------------------------- #
-def create_share(slides, expires_hours):
-    """创建分享：生成 token、写入并返回 share dict（含 token）。"""
+def create_share(slides, expires_hours, roi_sizes=None):
+    """创建分享：生成 token、写入并返回 share dict（含 token 与 roi_sizes）。
+
+    roi_sizes：矩形标记可选尺寸子集（元素 6/6.5），None 时默认两者皆可。
+    非法（非数组、含越界值、空）抛 ValueError。
+    """
+    roi_sizes_norm = _normalize_roi_sizes(roi_sizes)
     token = secrets.token_urlsafe(18)
     now = time.time()
     expires_at = now + float(expires_hours) * 3600.0
@@ -126,6 +177,7 @@ def create_share(slides, expires_hours):
         "expires_at": expires_at,
         "revoked": False,
         "token": token,
+        "roi_sizes": list(roi_sizes_norm),
     }
 
     def _do(f):
@@ -135,6 +187,7 @@ def create_share(slides, expires_hours):
             "created_at": now,
             "expires_at": expires_at,
             "revoked": False,
+            "roi_sizes": list(roi_sizes_norm),
         }
         _save_locked(f, data)
         return share
@@ -153,7 +206,10 @@ def _is_active(share):
 
 
 def get_share(token):
-    """获取有效分享；不存在/已撤销/已过期返回 None。"""
+    """获取有效分享；不存在/已撤销/已过期返回 None。
+
+    返回 dict 含 token 与归一化的 roi_sizes（旧分享无该字段默认两者皆可）。
+    """
     def _do(f):
         data = _load_locked(f)
         share = data["shares"].get(token)
@@ -163,6 +219,7 @@ def get_share(token):
             return None
         out = dict(share)
         out["token"] = token
+        out["roi_sizes"] = _share_roi_sizes(share)
         return out
 
     return _with_lock("r+", _do)
@@ -178,7 +235,7 @@ def _status_of(share):
 
 
 def list_shares():
-    """返回全部分享（含 status 字段），按 created_at 倒序。"""
+    """返回全部分享（含 status 与 roi_sizes 字段），按 created_at 倒序。"""
     def _do(f):
         data = _load_locked(f)
         items = []
@@ -186,6 +243,7 @@ def list_shares():
             out = dict(sh)
             out["token"] = tok
             out["status"] = _status_of(sh)
+            out["roi_sizes"] = _share_roi_sizes(sh)
             items.append(out)
         items.sort(key=lambda x: x.get("created_at", 0), reverse=True)
         return items

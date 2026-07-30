@@ -268,6 +268,12 @@ button {
 
 /* ROI 选中态沿用 accent 语义 */
 .roi-btn.active { color: var(--accent); }
+/* ROI 分段禁用态（本次分享不允许该尺寸） */
+.seg-control .seg.disabled,
+.roi-btn.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 
 /* mpp 设置区 */
 .mpp-setter { display: flex; align-items: center; gap: 4px; }
@@ -343,6 +349,7 @@ button {
   pointer-events: none;
   z-index: 0;
   image-rendering: auto;
+  transform-origin: center;
 }
 
 /* 标注画布层：瓦片之上、ROI 框之下；pointer-events 由绘制模式控制 */

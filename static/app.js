@@ -11,6 +11,7 @@
     roiMode: null,        // null | 6 | 6.5
     roi: { x: 0, y: 0, side: 0 },
     rotation: 0,
+    flipped: false,       // 是否水平翻转（镜像）
     drawMode: null,       // null | "arrow" | "freehand"（与 roiMode 互斥）
     showAnno: false,      // 是否在画布层显示已保存标注
   };
@@ -39,6 +40,7 @@
     zoomIn: $("zoom-in"),
     zoomOut: $("zoom-out"),
     rotateBtn: $("rotate-btn"),
+    flipBtn: $("flip-btn"),
     roi6: $("roi-6"),
     roi65: $("roi-6-5"),
     saveBtn: $("save-btn"),
@@ -80,6 +82,7 @@
     shareMgrBody: $("share-mgr-body"),
     shareExpiresSelect: $("share-expires-select"),
     shareExpiresCustom: $("share-expires-custom"),
+    shareRoiSizeSelect: $("share-roi-size-select"),
     shareCreateBtn: $("share-create-btn"),
     shareResult: $("share-result"),
     shareResultUrl: $("share-result-url"),
@@ -234,6 +237,14 @@
     // 底图随平移/缩放实时跟随（animation 每帧触发，跟随最平滑）
     viewer.addHandler("animation", function () { syncBaseThumb(); redrawAnnoCanvas(); });
     viewer.addHandler("rotate", function () { syncBaseThumb(); redrawAnnoCanvas(); });
+    // 镜像翻转：OSD 'flip' 事件 → 同步底图 transform / 重绘标注画布 / ROI 框重对位
+    viewer.addHandler("flip", function () {
+      state.flipped = !!viewer.viewport.getFlip();
+      applyBaseThumbFlip();
+      syncBaseThumb();
+      redrawAnnoCanvas();
+      updateRoiOverlay();
+    });
     viewer.addHandler("resize", redrawAnnoCanvas);
     // 切片关闭时清理旧底图
     viewer.addHandler("close", clearBaseThumb);
@@ -294,6 +305,13 @@
   }
 
   // ---------- 底图缩略图层（慢网下瓦片未到区域的模糊预览） ----------
+  function applyBaseThumbFlip() {
+    if (!baseThumbEl) return;
+    baseThumbEl.style.transformOrigin = "center";
+    baseThumbEl.style.transform = state.flipped ? "scaleX(-1)" : "";
+  }
+
+
   function clearBaseThumb() {
     if (baseThumbEl) {
       if (baseThumbEl.parentNode) baseThumbEl.parentNode.removeChild(baseThumbEl);
@@ -350,6 +368,7 @@
         baseThumbEl.src = "/api/slide/" + encodeURIComponent(name) + "/thumbnail";
         baseThumbEl.alt = "";
         viewer.container.insertBefore(baseThumbEl, viewer.canvas);
+        applyBaseThumbFlip();
         viewer.open("/api/slide/" + encodeURIComponent(name) + ".dzi");
         // 高亮列表项（未归类与项目切片行）
         document.querySelectorAll(".slide-row").forEach(function (it) {
@@ -389,10 +408,24 @@
     updateRoiOverlay();
     redrawAnnoCanvas();
   }
+  function flip() {
+    if (!viewer || !viewer.viewport || !viewer.viewport.toggleFlip) return;
+    viewer.viewport.toggleFlip();
+    // 'flip' 事件负责同步 state/各层；toggleFlip 可能未触发事件时兜底
+    state.flipped = !!viewer.viewport.getFlip();
+    applyBaseThumbFlip();
+    syncBaseThumb();
+    redrawAnnoCanvas();
+    updateRoiOverlay();
+  }
   function reset() {
     if (!viewer || !viewer.viewport) return;
     state.rotation = 0;
     viewer.viewport.setRotation(0);
+    // 复位时取消镜像（回到默认朝向）
+    if (viewer.viewport.getFlip && viewer.viewport.getFlip()) {
+      viewer.viewport.toggleFlip();
+    }
     viewer.viewport.goHome(true);
   }
 
@@ -1100,17 +1133,37 @@
     return parseFloat(v);
   }
 
+  // 读取"标记尺寸"下拉值 → roi_sizes 数组（[6,6.5]/[6]/[6.5]）
+  function getShareRoiSizes() {
+    var v = els.shareRoiSizeSelect ? els.shareRoiSizeSelect.value : "both";
+    if (v === "6") return [6];
+    if (v === "6.5") return [6.5];
+    return [6, 6.5];
+  }
+
+  // roi_sizes 数组 → 人类可读标签（用于分享列表 meta）
+  function roiSizesLabel(sizes) {
+    if (!sizes || !sizes.length) return "6/6.5mm";
+    var set = {};
+    sizes.forEach(function (s) { set[Number(s)] = true; });
+    if (set[6] && set[6.5]) return "6/6.5mm";
+    if (set[6.5]) return "仅 6.5mm";
+    if (set[6]) return "仅 6mm";
+    return "6/6.5mm";
+  }
+
   // 统一创建分享入口：slides 为要分享的切片名数组
   function doCreateShare(slides) {
     if (!slides || slides.length === 0) { toast("请先选择要分享的切片", "error"); return; }
     var hours = getExpiresHours();
     if (hours == null) { toast("请输入有效的小时数", "error"); return; }
+    var roiSizes = getShareRoiSizes();
     els.shareCreateBtn.disabled = true;
     els.shareCreateBtn.textContent = "生成中...";
     fetch("/api/share/create", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ slides: slides, expires_hours: hours }),
+      body: JSON.stringify({ slides: slides, expires_hours: hours, roi_sizes: roiSizes }),
     })
       .then(function (r) {
         if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || ("创建失败 " + r.status)); });
@@ -1202,7 +1255,9 @@
         '<span class="sr-sep">·</span>' +
         "<span>到期 " + fmtExpire(sh.expires_at) + "</span>" +
         '<span class="sr-sep">·</span>' +
-        "<span>选区 " + (sh.roi_count || 0) + "</span>";
+        "<span>选区 " + (sh.roi_count || 0) + "</span>" +
+        '<span class="sr-sep">·</span>' +
+        "<span>" + esc(roiSizesLabel(sh.roi_sizes)) + "</span>";
       mid.appendChild(meta);
       row.appendChild(mid);
 
@@ -1761,6 +1816,7 @@
     els.zoomIn.addEventListener("click", zoomIn);
     els.zoomOut.addEventListener("click", zoomOut);
     els.rotateBtn.addEventListener("click", rotate);
+    els.flipBtn.addEventListener("click", flip);
     els.resetBtn.addEventListener("click", reset);
     els.roi6.addEventListener("click", function () { toggleRoi(6); });
     els.roi65.addEventListener("click", function () { toggleRoi(6.5); });

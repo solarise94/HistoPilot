@@ -219,6 +219,15 @@ def _require_share(token):
     return share
 
 
+def _fmt_mm(v):
+    """把 mm 数值格式化为整数优先、否则一位小数（6 → "6"，6.5 → "6.5"）。"""
+    f = float(v)
+    if f == int(f):
+        return str(int(f))
+    # 6.5 这类保留一位
+    return ("%.1f" % f).rstrip("0").rstrip(".")
+
+
 def _require_slide(share, name):
     """校验 name 属于该 share 且通过文件名校验；否则 403/404。"""
     safe = _sanitize_name(name)
@@ -294,6 +303,17 @@ def share_slides(token):
             })
         items.append(info)
     return jsonify(items)
+
+
+@app.route("/s/<token>/api/config")
+def share_config(token):
+    """返回本次分享的配置（矩形标记允许的尺寸子集）。
+
+    先 _require_share：无效 token → 404，不泄露信息。
+    旧分享无 roi_sizes 字段时默认两者皆可。
+    """
+    share = _require_share(token)
+    return jsonify({"roi_sizes": share.get("roi_sizes") or list(share_store.DEFAULT_ROI_SIZES)})
 
 
 @app.route("/s/<token>/api/slide/<name>.dzi")
@@ -445,6 +465,21 @@ def share_roi_add(token):
     for k in ("x", "y", "side_px", "size_mm", "x1", "y1", "x2", "y2", "points"):
         if k in body:
             geom[k] = body[k]
+
+    # rect（含未指定默认 rect）需校验 size_mm ∈ 本次分享允许的尺寸子集；
+    # arrow / freehand 不受限。
+    if typ == "rect":
+        allowed = share.get("roi_sizes") or list(share_store.DEFAULT_ROI_SIZES)
+        size_mm_v = geom.get("size_mm")
+        try:
+            smm = float(size_mm_v)
+        except (TypeError, ValueError):
+            smm = None
+        if smm is None or smm not in allowed:
+            # 允许值拼接到友好的提示（如 "6 / 6.5"）
+            label_str = " / ".join(_fmt_mm(v) for v in allowed)
+            return jsonify(error="本次分享仅允许 " + label_str + " mm 标记"), 403
+
     try:
         roi = share_store.add_roi(token, safe, label, type=typ, **geom)
     except ValueError as e:
