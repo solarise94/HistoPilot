@@ -1,0 +1,490 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""切片分享 —— 独立 Flask 服务（view-only，对外）。
+
+监听 0.0.0.0:38000（可用 SHARE_PORT 覆盖）。
+所有 /s/<token>/... 路由先校验 token 有效，再校验 slide 归属于该分享。
+与主应用通过共享 JSON 文件（share_store）+ 共享上传目录（UPLOAD_DIR）交换数据。
+"""
+
+import io
+import os
+import threading
+import time
+from collections import OrderedDict
+from pathlib import Path
+
+from flask import (
+    Flask,
+    Response,
+    abort,
+    jsonify,
+    render_template,
+    request,
+    send_file,
+    send_from_directory,
+)
+from werkzeug.utils import secure_filename
+
+import openslide
+from openslide import OpenSlide
+from openslide.deepzoom import DeepZoomGenerator
+
+import share_store
+
+app = Flask(__name__)
+
+# 上传目录与主应用共享（容器内挂载同一卷）
+UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR") or (Path.home() / "svs-viewer" / "uploads"))
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+SUPPORTED_EXTS = {
+    "svs", "tif", "tiff", "ndpi", "mrxs", "vms", "vmu", "scn", "bif", "svslide",
+}
+
+# Deep Zoom 参数（512 瓦片降低公网请求数，渐进式 q82 JPEG 降体积并支持模糊→清晰预览）
+DZ_TILE_SIZE = 512
+DZ_OVERLAP = 1
+# JPEG 编码质量，可由环境变量 JPEG_QUALITY 覆盖（默认 82）
+JPEG_QUALITY = int(os.environ.get("JPEG_QUALITY") or 82)
+# 保留旧名（与主应用一致，实际值与 DZ_* 一致）
+TILE_SIZE = DZ_TILE_SIZE
+OVERLAP = DZ_OVERLAP
+
+# OpenSlide 缓存（独立进程，与主应用各自的缓存）
+_slide_cache: dict = {}
+_cache_lock = threading.Lock()
+
+# 瓦片内存缓存（LRU + TTL）：key=(name, level, x, y)，value=(ts, JPEG bytes)
+# 分享端只读，但切片可能被管理端删除后同名重传，加 TTL 兜底避免长期服务旧图
+TILE_CACHE_MAX = int(os.environ.get("TILE_CACHE_MAX") or 3000)
+TILE_CACHE_TTL = float(os.environ.get("TILE_CACHE_TTL") or 3600)  # 秒
+_tile_cache: "OrderedDict[tuple, tuple]" = OrderedDict()
+_tile_cache_lock = threading.Lock()
+
+
+def _tile_cache_get(key):
+    """LRU+TTL 命中：未过期才返回，过期剔除。"""
+    with _tile_cache_lock:
+        item = _tile_cache.get(key)
+        if item is None:
+            return None
+        ts, data = item
+        if time.time() - ts > TILE_CACHE_TTL:
+            _tile_cache.pop(key, None)
+            return None
+        _tile_cache.move_to_end(key)
+        return data
+
+
+def _tile_cache_put(key, data):
+    """LRU 写入，超上限淘汰最久未用。"""
+    with _tile_cache_lock:
+        _tile_cache[key] = (time.time(), data)
+        _tile_cache.move_to_end(key)
+        while len(_tile_cache) > TILE_CACHE_MAX:
+            _tile_cache.popitem(last=False)
+
+
+# --------------------------------------------------------------------------- #
+# 辅助函数（从 app.py 复制，保持一致）
+# --------------------------------------------------------------------------- #
+def _sanitize_name(name: str) -> str:
+    """净化文件名：防路径穿越同时保留中文等 Unicode 字符。"""
+    if not name or "\x00" in name:
+        return ""
+    has_non_ascii = any(ord(c) > 127 for c in name)
+    if not has_non_ascii:
+        return secure_filename(name)
+    cleaned_chars = []
+    for ch in name:
+        if ch in "/\\:" or ord(ch) < 32:
+            continue
+        cleaned_chars.append(ch)
+    cleaned = "".join(cleaned_chars).strip().rstrip(".")
+    cleaned = cleaned.replace("..", "")
+    return cleaned
+
+
+def _get_slide(name: str):
+    """从缓存获取（或打开）OpenSlide 与 DeepZoomGenerator，返回字典。"""
+    with _cache_lock:
+        entry = _slide_cache.get(name)
+        if entry is not None:
+            return entry
+
+    path = UPLOAD_DIR / name
+    if not path.is_file():
+        abort(404, "切片不存在")
+    try:
+        osr = OpenSlide(str(path))
+    except Exception:
+        abort(400, "无法打开切片文件")
+
+    dz = DeepZoomGenerator(
+        osr, tile_size=DZ_TILE_SIZE, overlap=DZ_OVERLAP, limit_bounds=True
+    )
+    entry = {"osr": osr, "dz": dz, "lock": threading.Lock()}
+    with _cache_lock:
+        existing = _slide_cache.get(name)
+        if existing is not None:
+            try:
+                osr.close()
+            except Exception:
+                pass
+            return existing
+        _slide_cache[name] = entry
+    return entry
+
+
+def _to_float(v):
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _mpp_from_tiff_resolution(path: Path):
+    """从 TIFF 分辨率标签读取 mpp（与主应用逻辑相同）。"""
+    try:
+        from PIL import Image
+        from PIL.TiffTags import TAGS_V2  # noqa: F401
+
+        with Image.open(str(path)) as img:
+            tags = getattr(img, "tag_v2", None)
+            if not tags:
+                return None, None
+            x_res = _to_float(tags.get(282))
+            y_res = _to_float(tags.get(283))
+            unit = tags.get(296, 2)
+            if not x_res or x_res <= 0:
+                return None, None
+            factor = 25400.0 if unit == 2 else (10000.0 if unit == 3 else None)
+            if factor is None:
+                return None, None
+            mpp_x = factor / x_res
+            mpp_y = factor / y_res if y_res and y_res > 0 else mpp_x
+            if 0.05 <= mpp_x <= 3.0:
+                return mpp_x, mpp_y
+    except Exception:
+        pass
+    return None, None
+
+
+def _read_metadata(osr: OpenSlide, path: Path) -> dict:
+    """读取尺寸与 mpp 元数据（与主应用逻辑相同）。"""
+    width, height = osr.dimensions
+    props = osr.properties
+    objective_f = _to_float(props.get("openslide.objective-power"))
+
+    mpp_x_f = _to_float(props.get("openslide.mpp-x"))
+    mpp_y_f = _to_float(props.get("openslide.mpp-y"))
+
+    if mpp_x_f is not None and mpp_y_f is not None:
+        mpp_source = "metadata"
+    else:
+        tiff_mpp_x, tiff_mpp_y = _mpp_from_tiff_resolution(path)
+        if tiff_mpp_x is not None:
+            mpp_x_f = mpp_x_f if mpp_x_f is not None else tiff_mpp_x
+            mpp_y_f = mpp_y_f if mpp_y_f is not None else tiff_mpp_y
+            mpp_source = "tiff-resolution"
+        elif objective_f is not None and objective_f > 0:
+            est = 10.0 / objective_f
+            mpp_x_f = mpp_x_f if mpp_x_f is not None else est
+            mpp_y_f = mpp_y_f if mpp_y_f is not None else est
+            mpp_source = "estimated"
+        else:
+            mpp_x_f = None
+            mpp_y_f = None
+            mpp_source = "missing"
+
+    return {
+        "width": width,
+        "height": height,
+        "mpp_x": mpp_x_f,
+        "mpp_y": mpp_y_f,
+        "objective": objective_f,
+        "mpp_source": mpp_source,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 安全核心：token 与 slide 校验
+# --------------------------------------------------------------------------- #
+def _require_share(token):
+    """校验 token 有效，返回 share dict；无效则 404（不泄露信息）。"""
+    share = share_store.get_share(token)
+    if share is None:
+        abort(404, "链接无效或已过期")
+    return share
+
+
+def _require_slide(share, name):
+    """校验 name 属于该 share 且通过文件名校验；否则 403/404。"""
+    safe = _sanitize_name(name)
+    if not safe or safe != name:
+        abort(403, "无权访问")
+    if safe not in share.get("slides", []):
+        abort(403, "无权访问")
+    return safe
+
+
+# --------------------------------------------------------------------------- #
+# 路由
+# --------------------------------------------------------------------------- #
+@app.errorhandler(404)
+def _handle_404(e):
+    return "链接无效或已过期", 404
+
+
+@app.errorhandler(403)
+def _handle_403(e):
+    return "无权访问", 403
+
+
+@app.route("/")
+def index():
+    return "链接无效或已过期", 404
+
+
+@app.route("/s/")
+@app.route("/s")
+def s_root():
+    return "链接无效或已过期", 404
+
+
+@app.route("/s/<token>")
+def share_page(token):
+    _require_share(token)
+    return render_template("share.html", token=token)
+
+
+@app.route("/s/<token>/api/slides")
+def share_slides(token):
+    share = _require_share(token)
+    items = []
+    for name in share["slides"]:
+        safe = _sanitize_name(name)
+        path = UPLOAD_DIR / safe
+        info = {"name": safe, "exists": path.is_file()}
+        if path.is_file():
+            try:
+                entry = _get_slide(safe)
+                with entry["lock"]:
+                    meta = _read_metadata(entry["osr"], path)
+                info.update(meta)
+            except Exception as e:
+                info.update({
+                    "width": None, "height": None,
+                    "mpp_x": None, "mpp_y": None,
+                    "mpp_source": "missing",
+                    "error": str(getattr(e, "description", e)),
+                })
+        else:
+            info.update({
+                "width": None, "height": None,
+                "mpp_x": None, "mpp_y": None,
+                "mpp_source": "missing",
+                "error": "文件不存在",
+            })
+        items.append(info)
+    return jsonify(items)
+
+
+@app.route("/s/<token>/api/slide/<name>.dzi")
+def share_slide_dzi(token, name):
+    share = _require_share(token)
+    safe = _require_slide(share, name)
+    entry = _get_slide(safe)
+    with entry["lock"]:
+        dz = entry["dz"]
+        width, height = dz.level_dimensions[-1]
+
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<Image xmlns="http://schemas.microsoft.com/deepzoom/2008" '
+        f'Url="/s/{token}/api/slide/{safe}_files/" Format="jpeg" '
+        f'Overlap="{DZ_OVERLAP}" TileSize="{DZ_TILE_SIZE}">'
+        f'<Size Width="{width}" Height="{height}"/>'
+        "</Image>"
+    )
+    resp = Response(xml, mimetype="application/xml")
+    # DZI 元数据短期可变（重传/换切片后尺寸会变），用短缓存
+    resp.headers["Cache-Control"] = "max-age=60"
+    return resp
+
+
+@app.route("/s/<token>/api/slide/<name>_files/<int:level>/<int:x>_<int:y>.jpeg")
+def share_slide_tile(token, name, level, x, y):
+    """返回 Deep Zoom 单张瓦片 JPEG（512×512、渐进式、q82，带 LRU+TTL 缓存）。"""
+    share = _require_share(token)
+    safe = _require_slide(share, name)
+
+    key = (safe, level, x, y)
+    cached = _tile_cache_get(key)
+    if cached is not None:
+        buf = io.BytesIO(cached)
+    else:
+        entry = _get_slide(safe)
+        with entry["lock"]:
+            dz = entry["dz"]
+            tile = dz.get_tile(level, (x, y))
+
+        # 含 alpha 通道时先转 RGB（JPEG 不支持透明度）
+        if tile.mode != "RGB":
+            tile = tile.convert("RGB")
+        buf = io.BytesIO()
+        # 渐进式 JPEG：浏览器可在下载中途显示模糊→清晰的瓦片，便于慢网预览
+        tile.save(
+            buf,
+            format="JPEG",
+            quality=JPEG_QUALITY,
+            progressive=True,
+            optimize=True,
+        )
+        _tile_cache_put(key, buf.getvalue())
+        buf.seek(0)
+
+    resp = send_file(buf, mimetype="image/jpeg")
+    # 瓦片内容不变，长期不可变缓存
+    resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return resp
+
+
+@app.route("/s/<token>/api/slide/<name>/crop")
+def share_slide_crop(token, name):
+    share = _require_share(token)
+    safe = _require_slide(share, name)
+    entry = _get_slide(safe)
+
+    def _parse_int(key):
+        try:
+            return int(request.args.get(key, ""))
+        except (TypeError, ValueError):
+            return None
+
+    x = _parse_int("x")
+    y = _parse_int("y")
+    size = _parse_int("size")
+    if x is None or y is None or size is None:
+        return jsonify(error="x/y/size 参数需为整数"), 400
+    if x < 0 or y < 0 or size <= 0 or size > 40000:
+        return jsonify(error="参数越界（0<=x,y，0<size<=40000）"), 400
+
+    with entry["lock"]:
+        osr = entry["osr"]
+        width, height = osr.dimensions
+        x2 = min(x, max(0, width - 1))
+        y2 = min(y, max(0, height - 1))
+        max_w = max(0, width - x2)
+        max_h = max(0, height - y2)
+        size2 = min(size, max_w, max_h)
+        if size2 <= 0:
+            return jsonify(error="裁剪区域超出图像边界"), 400
+        region = osr.read_region((x2, y2), 0, (size2, size2)).convert("RGB")
+
+    buf = io.BytesIO()
+    region.save(buf, format="PNG")
+    buf.seek(0)
+
+    stem = Path(safe).stem
+    download_name = f"{stem}_{x2}_{y2}_{size2}px.png"
+    return send_file(
+        buf,
+        mimetype="image/png",
+        as_attachment=True,
+        download_name=download_name,
+    )
+
+
+@app.route("/s/<token>/api/slide/<name>/thumbnail")
+def share_slide_thumbnail(token, name):
+    """返回缩略图 JPEG（用作查看器底图预览，慢网下避免瓦片未到区域变白）。"""
+    share = _require_share(token)
+    safe = _require_slide(share, name)
+    entry = _get_slide(safe)
+    with entry["lock"]:
+        osr = entry["osr"]
+        thumb = osr.get_thumbnail((400, 400))
+    if thumb.mode != "RGB":
+        thumb = thumb.convert("RGB")
+    buf = io.BytesIO()
+    thumb.save(buf, format="JPEG", quality=90)
+    buf.seek(0)
+    return send_file(buf, mimetype="image/jpeg")
+
+
+@app.route("/s/<token>/api/roi", methods=["POST"])
+def share_roi_add(token):
+    share = _require_share(token)
+    body = request.get_json(silent=True) or {}
+    slide = body.get("slide")
+    x = body.get("x")
+    y = body.get("y")
+    size_mm = body.get("size_mm")
+    side_px = body.get("side_px")
+    label = body.get("label")
+
+    # label 必填：去空白后非空
+    if not isinstance(label, str) or not label.strip():
+        return jsonify(error="请填写用户名或标签"), 400
+
+    if not slide or x is None or y is None or size_mm is None or side_px is None:
+        return jsonify(error="参数不完整"), 400
+    try:
+        x = float(x); y = float(y); size_mm = float(size_mm); side_px = float(side_px)
+    except (TypeError, ValueError):
+        return jsonify(error="参数需为数值"), 400
+    if x < 0 or y < 0 or side_px <= 0 or side_px > 40000:
+        return jsonify(error="数值越界"), 400
+
+    safe = _sanitize_name(slide)
+    if not safe or safe != slide or safe not in share.get("slides", []):
+        return jsonify(error="slide 不属于该分享"), 403
+
+    try:
+        roi = share_store.add_roi(token, safe, x, y, size_mm, side_px, label)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(ok=True, index=roi["index"])
+
+
+@app.route("/s/<token>/api/rois")
+def share_roi_list(token):
+    _require_share(token)
+    rois = share_store.list_rois(token)
+    return jsonify(rois)
+
+
+@app.route("/s/<token>/api/roi/<int:index>", methods=["DELETE"])
+def share_roi_delete(token, index):
+    _require_share(token)
+    ok = share_store.delete_roi(token, index)
+    if not ok:
+        return jsonify(error="选区不存在"), 404
+    return jsonify(ok=True)
+
+
+@app.route("/static/<path:filename>")
+def share_static(filename):
+    return send_from_directory("static", filename)
+
+
+if __name__ == "__main__":
+    # HTTPS：提供 SHARE_TLS_CERT / SHARE_TLS_KEY 时直接以 TLS 运行
+    # （frp TCP 隧道只是转发，TLS 需在本服务终止，避免被备案系统按 HTTP 拦截）
+    tls_cert = os.environ.get("SHARE_TLS_CERT")
+    tls_key = os.environ.get("SHARE_TLS_KEY")
+    ssl_context = None
+    if tls_cert and tls_key and os.path.exists(tls_cert) and os.path.exists(tls_key):
+        ssl_context = (tls_cert, tls_key)
+        print(f"[share_server] HTTPS enabled: {tls_cert}")
+    else:
+        print("[share_server] WARNING: 未找到 TLS 证书，以 HTTP 运行")
+
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("SHARE_PORT", 38000)),
+        threaded=True,
+        ssl_context=ssl_context,
+    )

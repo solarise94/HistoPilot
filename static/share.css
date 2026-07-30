@@ -1,0 +1,487 @@
+/* =========================================================================
+   切片分享页 —— 样式（手机优先，响应式）
+   ========================================================================= */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+               "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  color: #2c3e50;
+  overflow: hidden;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------- 无效 token 遮罩 ---------- */
+.invalid-mask {
+  position: fixed;
+  inset: 0;
+  background: #f0f2f5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+.invalid-text {
+  font-size: 20px;
+  font-weight: 700;
+  color: #6c757d;
+}
+
+/* ---------- 顶部 header ---------- */
+#app-header {
+  height: 52px;
+  background: linear-gradient(135deg, #1565C0, #1976D2);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+  flex-shrink: 0;
+  z-index: 10;
+}
+
+.header-title {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.header-current {
+  font-size: 12px;
+  opacity: 0.9;
+  max-width: 55%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
+}
+
+/* ---------- 切片切换栏 ---------- */
+.slide-chips {
+  background: #fff;
+  border-bottom: 1px solid #dee2e6;
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  flex-shrink: 0;
+  z-index: 9;
+}
+.slide-chips::-webkit-scrollbar { height: 4px; }
+.slide-chips::-webkit-scrollbar-thumb { background: #ced4da; border-radius: 2px; }
+
+.chip {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border: 1px solid #ced4da;
+  background: #f8f9fa;
+  border-radius: 16px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #2c3e50;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: all 0.15s ease;
+}
+.chip:hover { background: #e9ecef; }
+.chip.active {
+  background: linear-gradient(135deg, #1565C0, #1976D2);
+  color: #fff;
+  border-color: transparent;
+}
+
+/* ---------- 工具栏 ---------- */
+#toolbar {
+  background: linear-gradient(135deg, #f8f9fa, #e9ecef);
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid #dee2e6;
+  flex-shrink: 0;
+  z-index: 9;
+}
+
+.btn-group {
+  display: flex;
+  gap: 5px;
+}
+
+.tool-btn {
+  border: 1px solid #ced4da;
+  background: #fff;
+  color: #2c3e50;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.15s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  white-space: nowrap;
+  touch-action: manipulation;
+}
+
+.tool-btn:hover:not(:disabled) {
+  background: #f1f3f5;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+.tool-btn:active:not(:disabled) { transform: translateY(0); }
+.tool-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+#zoom-in, #zoom-out {
+  min-width: 34px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.roi-btn.active {
+  background: linear-gradient(135deg, #ffc107, #fd7e14);
+  border-color: #fd7e14;
+  color: #5a3500;
+  font-weight: 600;
+  box-shadow: 0 2px 6px rgba(253, 126, 20, 0.4);
+}
+
+/* 保存选区：绿 */
+.save-roi-btn {
+  background: linear-gradient(135deg, #28a745, #20c997);
+  border-color: transparent;
+  color: #fff;
+}
+.save-roi-btn:hover:not(:disabled) { filter: brightness(1.08); color: #fff; }
+.save-roi-btn:disabled { background: #adb5bd; color: #fff; border-color: transparent; }
+
+/* 导出图片：紫粉渐变 */
+.export-btn {
+  background: linear-gradient(135deg, #6f42c1, #e83e8c);
+  border-color: transparent;
+  color: #fff;
+}
+.export-btn:hover:not(:disabled) { filter: brightness(1.08); color: #fff; }
+.export-btn:disabled { background: #adb5bd; color: #fff; border-color: transparent; }
+
+/* Reset：红色渐变 */
+.reset-btn {
+  background: linear-gradient(135deg, #f38181, #ff6b6b);
+  border-color: transparent;
+  color: #fff;
+}
+.reset-btn:hover { filter: brightness(1.05); color: #fff; }
+
+.mpp-setter { display: flex; align-items: center; gap: 5px; }
+#mpp-input {
+  width: 80px;
+  padding: 5px 8px;
+  border: 1px solid #ced4da;
+  border-radius: 8px;
+  font-size: 13px;
+  outline: none;
+}
+#mpp-input:focus { border-color: #1976D2; }
+
+/* 标记人/标签输入框（保存选区必填） */
+.roi-label-setter { display: flex; align-items: center; }
+#roi-label {
+  flex: 1;
+  min-width: 140px;
+  max-width: 240px;
+  padding: 6px 10px;
+  border: 1px solid #ffc107;
+  border-radius: 8px;
+  font-size: 13px;
+  outline: none;
+  background: #fffdf5;
+  color: #2c3e50;
+}
+#roi-label::placeholder { color: #b58a00; }
+#roi-label:focus { border-color: #fd7e14; box-shadow: 0 0 0 2px rgba(253, 126, 20, 0.15); }
+
+.spacer { flex: 1; }
+
+.zoom-badge {
+  background: linear-gradient(135deg, #1565C0, #1976D2);
+  color: #fff;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  min-width: 54px;
+  text-align: center;
+}
+
+/* ---------- 查看器 ---------- */
+#viewer-wrap {
+  flex: 1;
+  position: relative;
+  background: #f0f2f5;
+  min-height: 0;
+}
+#viewer {
+  width: 100%;
+  height: 100%;
+}
+
+/* 底图缩略图层：铺在瓦片 canvas 之前的模糊预览，慢网下透出而非白块 */
+.osd-base-thumb {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  filter: blur(1px);
+  opacity: 0.9;
+  pointer-events: none;
+  z-index: 0;
+  image-rendering: auto;
+}
+
+/* ---------- ROI 选区 overlay（从主页 style.css 复制） ---------- */
+#roi-box {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border: 3px solid #FFD700;
+  background: transparent;
+  cursor: move;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.9),
+              0 0 12px rgba(255, 215, 0, 0.5);
+  z-index: 6;
+  touch-action: none;            /* 触屏拖拽不触发滚动 */
+}
+
+#roi-box .roi-corner {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #FFD700;
+  border: 1.5px solid #fff;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.4);
+}
+#roi-box .roi-corner.tl { top: -6px; left: -6px; }
+#roi-box .roi-corner.tr { top: -6px; right: -6px; }
+#roi-box .roi-corner.bl { bottom: -6px; left: -6px; }
+#roi-box .roi-corner.br { bottom: -6px; right: -6px; }
+
+#roi-box .roi-label {
+  position: absolute;
+  top: -28px;
+  left: 0;
+  background: #FFD700;
+  color: #5a3500;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+/* ---------- 选区浮动按钮 + 面板 ---------- */
+.roi-panel-toggle {
+  position: fixed;
+  right: 14px;
+  bottom: 18px;
+  z-index: 50;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 24px;
+  background: linear-gradient(135deg, #1565C0, #1976D2);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+.roi-panel-toggle:hover { filter: brightness(1.08); }
+
+.roi-panel {
+  position: fixed;
+  right: 14px;
+  bottom: 70px;
+  z-index: 51;
+  width: 320px;
+  max-height: 60vh;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.2);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.roi-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid #eee;
+  font-size: 14px;
+  font-weight: 600;
+}
+.roi-panel-close {
+  border: none;
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+  color: #adb5bd;
+  cursor: pointer;
+}
+.roi-panel-close:hover { color: #2c3e50; }
+
+.roi-panel-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.roi-panel-empty {
+  color: #999;
+  font-size: 13px;
+  text-align: center;
+  padding: 20px 8px;
+}
+
+.roi-panel-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #eee;
+  margin-bottom: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.roi-panel-item:hover { background: #f1f3f5; }
+.roi-panel-item .ri-info {
+  flex: 1;
+  min-width: 0;
+}
+.roi-panel-item .ri-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #2c3e50;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.roi-panel-item .ri-title .ri-label {
+  font-weight: 700;
+  color: #1565C0;
+}
+.roi-panel-item .ri-sub {
+  font-size: 11px;
+  color: #6c757d;
+  margin-top: 2px;
+}
+.roi-panel-item .ri-del {
+  border: none;
+  background: transparent;
+  color: #adb5bd;
+  font-size: 16px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.roi-panel-item .ri-del:hover { background: #ff6b6b; color: #fff; }
+
+/* ---------- toast ---------- */
+#toast-container {
+  position: fixed;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  pointer-events: none;
+}
+
+.toast {
+  padding: 10px 16px;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  animation: toast-in 0.25s ease;
+  max-width: 90vw;
+  word-break: break-word;
+}
+.toast.success { background: #28a745; }
+.toast.error   { background: #dc3545; }
+.toast.info    { background: #17a2b8; }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ---------- 响应式：手机端 ---------- */
+@media (max-width: 768px) {
+  #app-header {
+    height: 46px;
+    padding: 0 12px;
+  }
+  .header-title { font-size: 15px; }
+  .header-current { font-size: 11px; max-width: 50%; }
+
+  .slide-chips { padding: 6px 10px; gap: 6px; }
+  .chip { padding: 5px 10px; font-size: 11px; max-width: 140px; }
+
+  #toolbar {
+    padding: 8px 10px;
+    gap: 6px;
+  }
+  .tool-btn {
+    padding: 5px 9px;
+    font-size: 12px;
+  }
+  #zoom-in, #zoom-out { min-width: 30px; }
+  .zoom-badge { padding: 3px 8px; font-size: 11px; min-width: 46px; }
+
+  /* 手机端标签输入框随工具栏换行，宽度自适应 */
+  .roi-label-setter { flex: 1 1 100%; }
+  #roi-label { min-width: 0; max-width: none; width: 100%; }
+
+  /* 选区面板：手机端全宽抽屉 */
+  .roi-panel {
+    right: 0;
+    left: 0;
+    bottom: 0;
+    width: auto;
+    max-height: 50vh;
+    border-radius: 12px 12px 0 0;
+  }
+  .roi-panel-toggle {
+    right: 12px;
+    bottom: 14px;
+    padding: 8px 14px;
+    font-size: 12px;
+  }
+}

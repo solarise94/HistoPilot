@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>病理切片查看</title>
+  <link rel="stylesheet" href="/static/share.css" />
+  <!-- OpenSeadragon 5.0.1（已本地化） -->
+  <script src="/static/openseadragon.min.js"></script>
+</head>
+<body>
+  <!-- 无效 token 遮罩 -->
+  <div id="invalid-mask" class="invalid-mask" style="display:none;">
+    <div class="invalid-text">链接无效或已过期</div>
+  </div>
+
+  <!-- 顶部蓝色渐变 header -->
+  <header id="app-header">
+    <div class="header-title">病理切片查看</div>
+    <div id="current-slide" class="header-current">加载中…</div>
+  </header>
+
+  <!-- 切片切换栏（多张时显示） -->
+  <div id="slide-chips" class="slide-chips" style="display:none;"></div>
+
+  <!-- 工具栏 -->
+  <div id="toolbar">
+    <div class="btn-group">
+      <button id="zoom-out" class="tool-btn" title="缩小">−</button>
+      <button id="zoom-in" class="tool-btn" title="放大">+</button>
+    </div>
+
+    <button id="rotate-btn" class="tool-btn" title="顺时针旋转 90°">↻</button>
+
+    <div class="btn-group roi-group">
+      <button id="roi-6" class="tool-btn roi-btn" data-size="6">ROI 6mm</button>
+      <button id="roi-6-5" class="tool-btn roi-btn" data-size="6.5">ROI 6.5mm</button>
+    </div>
+
+    <button id="save-roi-btn" class="tool-btn save-roi-btn" disabled>保存选区</button>
+    <button id="export-btn" class="tool-btn export-btn" disabled>导出图片</button>
+    <button id="reset-btn" class="tool-btn reset-btn">Reset</button>
+
+    <!-- 标记人/标签（保存选区时必填） -->
+    <div class="roi-label-setter">
+      <input id="roi-label" type="text" maxlength="40"
+             placeholder="标记人/标签（如 张三 / 病理号）"
+             title="保存选区前请填写标记人或标签" autocomplete="off" />
+    </div>
+
+    <!-- mpp 手动设置区（仅 mpp 缺失或估算时显示） -->
+    <div id="mpp-setter" class="mpp-setter" style="display:none;">
+      <input id="mpp-input" type="number" step="0.01" min="0.01" placeholder="mpp" title="手动输入 µm/px" />
+      <button id="mpp-set-btn" class="tool-btn">设置</button>
+    </div>
+
+    <div class="spacer"></div>
+
+    <span id="zoom-badge" class="zoom-badge">100%</span>
+  </div>
+
+  <!-- 查看器 -->
+  <main id="viewer-wrap">
+    <div id="viewer"></div>
+  </main>
+
+  <!-- 已保存选区浮动按钮 -->
+  <button id="roi-panel-toggle" class="roi-panel-toggle">选区(0)</button>
+
+  <!-- 选区面板 -->
+  <div id="roi-panel" class="roi-panel" style="display:none;">
+    <div class="roi-panel-header">
+      <span>已保存选区</span>
+      <button id="roi-panel-close" class="roi-panel-close">×</button>
+    </div>
+    <div id="roi-panel-list" class="roi-panel-list">
+      <div class="roi-panel-empty">暂无选区</div>
+    </div>
+  </div>
+
+  <!-- toast 容器 -->
+  <div id="toast-container"></div>
+
+  <script>
+    window.__SHARE_TOKEN__ = "{{ token }}";
+  </script>
+  <script src="/static/share.js"></script>
+</body>
+</html>

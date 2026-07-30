@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SVS 病理图像查看器</title>
+  <link rel="stylesheet" href="/static/style.css?v=20260730c" />
+  <!-- OpenSeadragon 5.0.1（已本地化） -->
+  <script src="/static/openseadragon.min.js"></script>
+</head>
+<body>
+  <!-- 统一标题栏 + 工具栏（macOS unified titlebar-toolbar） -->
+  <header id="app-header">
+    <div class="title-group">
+      <span class="header-title">SVS 病理图像查看器</span>
+      <span class="title-sep">·</span>
+      <span id="current-slide" class="header-current">未打开切片</span>
+    </div>
+
+    <div id="toolbar">
+      <!-- 缩放 -->
+      <div class="btn-group">
+        <button id="zoom-out" class="icon-btn" title="缩小" aria-label="缩小">−</button>
+        <button id="zoom-in" class="icon-btn" title="放大" aria-label="放大">+</button>
+      </div>
+
+      <button id="rotate-btn" class="icon-btn" title="顺时针旋转 90°" aria-label="旋转">↻</button>
+
+      <!-- ROI 分段控件（NSSegmentedControl 风格） -->
+      <div class="seg-control roi-group" role="group" aria-label="ROI 分段">
+        <button id="roi-6" class="seg roi-btn" data-size="6">ROI 6mm</button>
+        <button id="roi-6-5" class="seg roi-btn" data-size="6.5">ROI 6.5mm</button>
+      </div>
+
+      <!-- 主操作 -->
+      <button id="save-btn" class="tool-btn primary" disabled>保存图片</button>
+
+      <!-- 标记：打开当前切片标注面板 -->
+      <button id="anno-btn" class="tool-btn" disabled>标记</button>
+      <!-- 显示全部标记叠加层 -->
+      <button id="anno-all-btn" class="tool-btn" disabled>显示全部标记</button>
+
+      <button id="reset-btn" class="tool-btn">Reset</button>
+
+      <!-- mpp 手动设置区（仅 mpp 缺失或估算时显示） -->
+      <div id="mpp-setter" class="mpp-setter" style="display:none;">
+        <input id="mpp-input" type="number" step="0.01" min="0.01" placeholder="mpp" title="手动输入 µm/px" />
+        <button id="mpp-set-btn" class="tool-btn">设置</button>
+      </div>
+
+      <div class="spacer"></div>
+
+      <span id="zoom-badge" class="zoom-badge">100%</span>
+    </div>
+  </header>
+
+  <!-- 主体：左侧边栏 + 右侧查看器 -->
+  <div id="main">
+    <!-- 左侧边栏：Finder 源列表风 -->
+    <aside id="sidebar">
+      <div class="sidebar-top">
+        <button id="upload-btn" class="btn primary block">上传切片</button>
+        <button id="new-project-btn" class="btn secondary block">＋ 新建项目</button>
+        <input id="file-input" type="file"
+               accept=".svs,.tif,.tiff,.ndpi,.mrxs,.vms,.vmu,.scn,.bif,.svslide"
+               hidden />
+        <div id="progress-wrap" class="progress-wrap" style="display:none;">
+          <div id="progress-bar" class="progress-bar"></div>
+          <span id="progress-text" class="progress-text">0%</span>
+        </div>
+
+        <!-- 内联新建项目表单 -->
+        <div id="new-project-form" class="new-project-form" style="display:none;">
+          <input id="np-name" type="text" maxlength="60" placeholder="项目名称" autocomplete="off" />
+          <input id="np-note" type="text" maxlength="200" placeholder="备注（可选）" autocomplete="off" />
+          <div class="np-actions">
+            <button id="np-confirm" class="btn primary small">确认</button>
+            <button id="np-cancel" class="btn secondary small">取消</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar-scroll">
+        <!-- 分区：项目 -->
+        <div class="section-head">项目</div>
+        <!-- 项目列表 -->
+        <div id="project-list" class="project-list">
+          <!-- 由 JS 动态渲染 -->
+        </div>
+
+        <!-- 未归类切片（不在任何项目） -->
+        <div id="unfiled-section" class="section">
+          <div class="section-head row" id="unfiled-toggle">
+            <span class="caret">▾</span>
+            <span class="section-title">未归类切片</span>
+            <span id="unfiled-count" class="count-badge">0</span>
+          </div>
+          <div id="unfiled-body" class="section-body">
+            <div id="unfiled-list" class="unfiled-list"></div>
+            <div class="unfiled-ops">
+              <button id="unfiled-new-project" class="btn secondary small">新建项目(含选中)</button>
+              <button id="unfiled-share" class="btn primary small">分享选中</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 分享管理（折叠区） -->
+        <div class="section">
+          <div class="section-head row" id="share-mgr-toggle">
+            <span class="caret">▾</span>
+            <span class="section-title">分享管理</span>
+          </div>
+          <!-- 创建分享控件 -->
+          <div id="share-mgr-body" class="section-body">
+            <div class="share-row">
+              <select id="share-expires-select" class="select">
+                <option value="6">6 小时</option>
+                <option value="24" selected>24 小时</option>
+                <option value="72">3 天</option>
+                <option value="168">7 天</option>
+                <option value="custom">自定义</option>
+              </select>
+              <input id="share-expires-custom" class="input" type="number"
+                     min="0.1" max="720" step="0.1" placeholder="小时" style="display:none;" />
+            </div>
+            <button id="share-create-btn" class="btn primary block">分享选中切片</button>
+
+            <!-- 创建结果 -->
+            <div id="share-result" class="share-result" style="display:none;">
+              <input id="share-result-url" class="share-result-url" readonly />
+              <button id="share-result-copy" class="btn primary small">复制</button>
+            </div>
+
+            <!-- 分享列表 -->
+            <div id="share-list" class="share-list"></div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 右侧查看器 -->
+    <main id="viewer-wrap">
+      <div id="viewer"></div>
+      <!-- 拖拽上传提示遮罩 -->
+      <div id="drop-overlay" class="drop-overlay">
+        <div class="drop-text">松开以上传切片</div>
+      </div>
+
+      <!-- 切片选择浮层（添加切片到项目） -->
+      <div id="slide-picker-mask" class="picker-mask" style="display:none;">
+        <div class="picker-dialog">
+          <div class="picker-title">
+            <span id="picker-title-text">添加切片到项目</span>
+            <button id="picker-close" class="icon-btn close" aria-label="关闭">×</button>
+          </div>
+          <div id="picker-list" class="picker-list"></div>
+          <div class="picker-footer">
+            <span id="picker-selected-count" class="picker-count">已选 0</span>
+            <button id="picker-confirm" class="btn primary">确认添加</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 标注面板（查看器右侧/底部） -->
+      <div id="anno-panel" class="anno-panel" style="display:none;">
+        <div class="anno-panel-header">
+          <span id="anno-panel-title">标注</span>
+          <button id="anno-panel-close" class="icon-btn close" aria-label="关闭">×</button>
+        </div>
+        <div id="anno-panel-list" class="anno-panel-list">
+          <div class="anno-panel-empty">暂无标注</div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- toast 容器 -->
+  <div id="toast-container"></div>
+
+  <script src="/static/app.js?v=20260730c"></script>
+</body>
+</html>
