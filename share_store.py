@@ -25,7 +25,23 @@ SHARE_DATA_DIR.mkdir(parents=True, exist_ok=True)
 SHARE_FILE = SHARE_DATA_DIR / "shares.json"
 
 # 空结构骨架
-_EMPTY = {"shares": {}, "rois": [], "projects": {}}
+_EMPTY = {"shares": {}, "rois": [], "projects": {}, "slide_meta": {}}
+
+# 支持的标注类型
+ROI_TYPES = ("rect", "arrow", "freehand")
+
+# 管理员标注使用的固定 token
+ADMIN_TOKEN = "admin"
+
+
+def _is_finite_num(v):
+    """判断 v 是否为有限数值（int/float，非 NaN/Inf）。"""
+    if isinstance(v, bool):
+        return False
+    if not isinstance(v, (int, float)):
+        return False
+    import math
+    return math.isfinite(v)
 
 
 def _load_locked(f):
@@ -42,12 +58,16 @@ def _load_locked(f):
         data.setdefault("rois", [])
         # 向后兼容：旧文件无 projects 时补 {}
         data.setdefault("projects", {})
+        # 向后兼容：旧文件无 slide_meta 时补 {}
+        data.setdefault("slide_meta", {})
         if not isinstance(data["shares"], dict):
             data["shares"] = {}
         if not isinstance(data["rois"], list):
             data["rois"] = []
         if not isinstance(data["projects"], dict):
             data["projects"] = {}
+        if not isinstance(data["slide_meta"], dict):
+            data["slide_meta"] = {}
         return data
     except (json.JSONDecodeError, ValueError):
         # 损坏：备份后重建
@@ -63,7 +83,7 @@ def _load_locked(f):
 
 def _copy_empty():
     """返回一个新的空结构（避免共享引用）。"""
-    return {"shares": {}, "rois": [], "projects": {}}
+    return {"shares": {}, "rois": [], "projects": {}, "slide_meta": {}}
 
 
 def _save_locked(f, data):
@@ -187,14 +207,103 @@ def revoke_share(token):
     return _with_lock("r+", _do)
 
 
-def add_roi(token, slide, x, y, size_mm, side_px, label):
-    """为 token 的 share 添加一条 ROI；校验 share 存在且 slide 属于它。
+def _validate_geom(typ, geom):
+    """校验几何字段，返回归一化后的几何 dict（不含 type/label/token/slide/ts）。
+
+    - rect：x, y, side_px, size_mm（side_px 1~40000）
+    - arrow：x1, y1, x2, y2（两端点距离 > 0）
+    - freehand：points: [[x,y],...]（3~500 点，坐标 ≥0 且有限）
+    坐标均要求 ≥0 且数值有限；x/y/side_px 等兼容字段据此计算。
+    校验失败抛 ValueError。
+    """
+    if typ == "rect":
+        x = geom.get("x")
+        y = geom.get("y")
+        side_px = geom.get("side_px")
+        size_mm = geom.get("size_mm")
+        if not (_is_finite_num(x) and _is_finite_num(y) and _is_finite_num(side_px)):
+            raise ValueError("几何参数需为数值")
+        x = int(x); y = int(y)
+        side_px = int(side_px)
+        if x < 0 or y < 0:
+            raise ValueError("坐标需 ≥0")
+        if side_px < 1 or side_px > 40000:
+            raise ValueError("side_px 需在 1~40000 之间")
+        size_mm_v = float(size_mm) if _is_finite_num(size_mm) else 0.0
+        return {
+            "type": "rect",
+            "x": x, "y": y,
+            "side_px": side_px,
+            "size_mm": size_mm_v,
+        }
+
+    if typ == "arrow":
+        x1 = geom.get("x1"); y1 = geom.get("y1")
+        x2 = geom.get("x2"); y2 = geom.get("y2")
+        if not all(_is_finite_num(v) for v in (x1, y1, x2, y2)):
+            raise ValueError("几何参数需为数值")
+        x1 = int(x1); y1 = int(y1); x2 = int(x2); y2 = int(y2)
+        if any(v < 0 for v in (x1, y1, x2, y2)):
+            raise ValueError("坐标需 ≥0")
+        dist2 = (x1 - x2) ** 2 + (y1 - y2) ** 2
+        if dist2 <= 0:
+            raise ValueError("箭头两端点不能重合")
+        # 中点存 x/y，side_px 留 0（兼容旧查询，无意义）
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+        return {
+            "type": "arrow",
+            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "x": cx, "y": cy,
+            "side_px": 0,
+            "size_mm": 0.0,
+        }
+
+    if typ == "freehand":
+        pts = geom.get("points")
+        if not isinstance(pts, list) or len(pts) < 3 or len(pts) > 500:
+            raise ValueError("描图需 3~500 个点")
+        clean = []
+        for p in pts:
+            if (not isinstance(p, (list, tuple))) or len(p) != 2:
+                raise ValueError("points 元素需为 [x,y]")
+            px, py = p
+            if not (_is_finite_num(px) and _is_finite_num(py)):
+                raise ValueError("坐标需为数值")
+            px = int(px); py = int(py)
+            if px < 0 or py < 0:
+                raise ValueError("坐标需 ≥0")
+            clean.append([px, py])
+        xs = [p[0] for p in clean]
+        ys = [p[1] for p in clean]
+        minx = min(xs); miny = min(ys)
+        side = max(max(xs) - minx, max(ys) - miny)
+        return {
+            "type": "freehand",
+            "points": clean,
+            "x": minx, "y": miny,
+            "side_px": int(side),
+            "size_mm": 0.0,
+        }
+
+    raise ValueError("未知标注类型")
+
+
+def add_roi(token, slide, label, type="rect", size_mm=0.0, **geom):
+    """为 token 的 share 添加一条标注；统一入口，支持 rect/arrow/freehand。
+
+    管理员标注使用 token="admin"（此时 share 校验放宽：不要求 token 命中 shares，
+    但仍要求 slide 文件名合法）。普通用户标注校验 share 存在、有效、且 slide 属于它。
 
     label（标记人/标签）为必填，去空白后非空，否则抛 ValueError。
+    type 必须是 ROI_TYPES 之一（缺省 rect，向后兼容）。
 
     返回新增的 roi dict（含该 token 下的 index，从 0 起按时间顺序）。
     若校验失败抛出 ValueError。
     """
+    # type 合法性
+    if type not in ROI_TYPES:
+        raise ValueError("未知标注类型")
     # label 非空校验（在锁外做即可）
     if not isinstance(label, str):
         raise ValueError("请填写用户名或标签")
@@ -202,23 +311,31 @@ def add_roi(token, slide, x, y, size_mm, side_px, label):
     if not label:
         raise ValueError("请填写用户名或标签")
 
+    # 几何校验（合并 size_mm，rect 会覆盖）
+    geom_full = dict(geom)
+    geom_full["size_mm"] = size_mm
+    norm = _validate_geom(type, geom_full)
+    norm["type"] = type
+
     def _do(f):
         data = _load_locked(f)
-        share = data["shares"].get(token)
-        if share is None or not _is_active(share):
-            raise ValueError("share invalid")
-        if slide not in share.get("slides", []):
-            raise ValueError("slide not in share")
+        is_admin = (token == ADMIN_TOKEN)
+        if is_admin:
+            # 管理员标注：不要求 token 命中 shares，slide 文件名合法性由调用方保证
+            pass
+        else:
+            share = data["shares"].get(token)
+            if share is None or not _is_active(share):
+                raise ValueError("share invalid")
+            if slide not in share.get("slides", []):
+                raise ValueError("slide not in share")
         roi = {
             "token": token,
             "slide": slide,
-            "x": int(x),
-            "y": int(y),
-            "size_mm": float(size_mm),
-            "side_px": int(side_px),
             "label": label,
             "ts": time.time(),
         }
+        roi.update(norm)
         data["rois"].append(roi)
         _save_locked(f, data)
         # index 为该 token 下按插入顺序的序号
@@ -287,6 +404,76 @@ def roi_count_by_token():
         for r in data["rois"]:
             counts[r["token"]] = counts.get(r["token"], 0) + 1
         return counts
+
+    return _with_lock("r+", _do)
+
+
+# --------------------------------------------------------------------------- #
+# 样本元数据（别名/备注）—— shares.json 顶层 slide_meta
+# --------------------------------------------------------------------------- #
+def set_slide_meta(name, alias=None, note=None):
+    """设置/更新某切片的别名与备注。
+
+    alias/note 为 None 表示不改该项；空串表示清除该项。
+    name 不存在时仍写入（便于先建别名后传文件）；返回更新后的 meta dict。
+    """
+    def _do(f):
+        data = _load_locked(f)
+        meta_map = data.setdefault("slide_meta", {})
+        if not isinstance(meta_map, dict):
+            meta_map = {}
+            data["slide_meta"] = meta_map
+        cur = meta_map.get(name)
+        if not isinstance(cur, dict):
+            cur = {}
+        if alias is not None:
+            a = alias.strip() if isinstance(alias, str) else ""
+            if a:
+                cur["alias"] = a
+            else:
+                cur.pop("alias", None)
+        if note is not None:
+            n = note.strip() if isinstance(note, str) else ""
+            if n:
+                cur["note"] = n
+            else:
+                cur.pop("note", None)
+        if cur:
+            meta_map[name] = cur
+        else:
+            meta_map.pop(name, None)
+        _save_locked(f, data)
+        return dict(cur)
+
+    return _with_lock("r+", _do)
+
+
+def get_slide_meta(name):
+    """返回某切片的 {alias, note}（无则空 dict，保证字段存在为空串）。"""
+    def _do(f):
+        data = _load_locked(f)
+        meta_map = data.get("slide_meta", {})
+        cur = meta_map.get(name) if isinstance(meta_map, dict) else None
+        if not isinstance(cur, dict):
+            return {"alias": "", "note": ""}
+        return {"alias": cur.get("alias", ""), "note": cur.get("note", "")}
+
+    return _with_lock("r+", _do)
+
+
+def get_all_slide_meta():
+    """返回全量 {name: {alias, note}}。"""
+    def _do(f):
+        data = _load_locked(f)
+        meta_map = data.get("slide_meta", {})
+        if not isinstance(meta_map, dict):
+            return {}
+        out = {}
+        for k, v in meta_map.items():
+            if not isinstance(v, dict):
+                continue
+            out[k] = {"alias": v.get("alias", ""), "note": v.get("note", "")}
+        return out
 
     return _with_lock("r+", _do)
 
@@ -454,8 +641,8 @@ def annotations_by_slide():
     """把全部 rois 按 slide 分组聚合。
 
     返回 {slide: {label: {"label","count","items":[...]}, ...}}，items 含
-    token/x/y/size_mm/side_px/ts。结构是嵌套：slide -> label -> group。
-    为方便前端，外层每个 slide 的值是按 label 的分组列表。
+    token/x/y/size_mm/side_px/ts/type 及 arrow/freehand 的几何字段。结构是嵌套：
+    slide -> label -> group。为方便前端，外层每个 slide 的值是按 label 的分组列表。
     """
     def _do(f):
         data = _load_locked(f)
@@ -470,14 +657,20 @@ def annotations_by_slide():
                 grp = {"label": lbl, "count": 0, "items": []}
                 grp_map[lbl] = grp
             grp["count"] += 1
-            grp["items"].append({
+            item = {
                 "token": r.get("token"),
+                "type": r.get("type", "rect"),  # 旧数据无 type 视为 rect
                 "x": r.get("x"),
                 "y": r.get("y"),
                 "size_mm": r.get("size_mm"),
                 "side_px": r.get("side_px"),
                 "ts": r.get("ts"),
-            })
+            }
+            # 带上 arrow / freehand 专属几何字段（存在则透传）
+            for k in ("x1", "y1", "x2", "y2", "points"):
+                if k in r:
+                    item[k] = r[k]
+            grp["items"].append(item)
         # 转为 slide -> list[group]（label 按出现顺序）
         result = {}
         for slide, grp_map in by_slide.items():

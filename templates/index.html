@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SVS 病理图像查看器</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260730c" />
+  <link rel="stylesheet" href="/static/style.css?v=20260731a" />
   <!-- OpenSeadragon 5.0.1（已本地化） -->
   <script src="/static/openseadragon.min.js"></script>
 </head>
@@ -32,12 +32,22 @@
         <button id="roi-6-5" class="seg roi-btn" data-size="6.5">ROI 6.5mm</button>
       </div>
 
+      <!-- 标注绘制工具：箭头 / 描图（与 ROI 模式互斥） -->
+      <div class="btn-group anno-tools">
+        <button id="anno-arrow-btn" class="tool-btn" title="绘制箭头标注" disabled>↗ 箭头</button>
+        <button id="anno-free-btn" class="tool-btn" title="绘制描图标注" disabled>〰 描图</button>
+      </div>
+      <!-- 标注人（管理员标注用，默认"管理员"） -->
+      <input id="anno-label-input" type="text" maxlength="40"
+             class="anno-label-input" placeholder="默认 管理员"
+             title="标注人（留空则用「管理员」）" autocomplete="off" />
+
       <!-- 主操作 -->
       <button id="save-btn" class="tool-btn primary" disabled>保存图片</button>
 
       <!-- 标记：打开当前切片标注面板 -->
       <button id="anno-btn" class="tool-btn" disabled>标记</button>
-      <!-- 显示全部标记叠加层 -->
+      <!-- 显示全部标记叠加层（切换标注画布层显隐） -->
       <button id="anno-all-btn" class="tool-btn" disabled>显示全部标记</button>
 
       <button id="reset-btn" class="tool-btn">Reset</button>
@@ -141,6 +151,8 @@
     <!-- 右侧查看器 -->
     <main id="viewer-wrap">
       <div id="viewer"></div>
+      <!-- 标注画布层：在瓦片之上、ROI 框之下；pointer-events 由绘制模式控制 -->
+      <canvas id="anno-canvas" class="anno-canvas"></canvas>
       <!-- 拖拽上传提示遮罩 -->
       <div id="drop-overlay" class="drop-overlay">
         <div class="drop-text">松开以上传切片</div>
@@ -177,6 +189,6 @@
   <!-- toast 容器 -->
   <div id="toast-container"></div>
 
-  <script src="/static/app.js?v=20260730c"></script>
+  <script src="/static/app.js?v=20260731a"></script>
 </body>
 </html>

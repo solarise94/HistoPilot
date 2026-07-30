@@ -262,11 +262,16 @@ def share_page(token):
 @app.route("/s/<token>/api/slides")
 def share_slides(token):
     share = _require_share(token)
+    # 一次性取 slide_meta，减少锁竞争
+    all_meta = share_store.get_all_slide_meta()
     items = []
     for name in share["slides"]:
         safe = _sanitize_name(name)
         path = UPLOAD_DIR / safe
         info = {"name": safe, "exists": path.is_file()}
+        sm = all_meta.get(safe, {})
+        info["alias"] = sm.get("alias", "")
+        info["note"] = sm.get("note", "")
         if path.is_file():
             try:
                 entry = _get_slide(safe)
@@ -419,31 +424,29 @@ def share_roi_add(token):
     share = _require_share(token)
     body = request.get_json(silent=True) or {}
     slide = body.get("slide")
-    x = body.get("x")
-    y = body.get("y")
-    size_mm = body.get("size_mm")
-    side_px = body.get("side_px")
     label = body.get("label")
+    typ = body.get("type", "rect")
 
     # label 必填：去空白后非空
     if not isinstance(label, str) or not label.strip():
         return jsonify(error="请填写用户名或标签"), 400
 
-    if not slide or x is None or y is None or size_mm is None or side_px is None:
-        return jsonify(error="参数不完整"), 400
-    try:
-        x = float(x); y = float(y); size_mm = float(size_mm); side_px = float(side_px)
-    except (TypeError, ValueError):
-        return jsonify(error="参数需为数值"), 400
-    if x < 0 or y < 0 or side_px <= 0 or side_px > 40000:
-        return jsonify(error="数值越界"), 400
+    if typ not in share_store.ROI_TYPES:
+        return jsonify(error="未知标注类型"), 400
 
+    if not slide:
+        return jsonify(error="缺少 slide"), 400
     safe = _sanitize_name(slide)
     if not safe or safe != slide or safe not in share.get("slides", []):
         return jsonify(error="slide 不属于该分享"), 403
 
+    # 收集几何字段透传给 store 校验
+    geom = {}
+    for k in ("x", "y", "side_px", "size_mm", "x1", "y1", "x2", "y2", "points"):
+        if k in body:
+            geom[k] = body[k]
     try:
-        roi = share_store.add_roi(token, safe, x, y, size_mm, side_px, label)
+        roi = share_store.add_roi(token, safe, label, type=typ, **geom)
     except ValueError as e:
         return jsonify(error=str(e)), 400
     return jsonify(ok=True, index=roi["index"])
@@ -451,13 +454,32 @@ def share_roi_add(token):
 
 @app.route("/s/<token>/api/rois")
 def share_roi_list(token):
-    _require_share(token)
-    rois = share_store.list_rois(token)
-    return jsonify(rois)
+    """返回该 token 的标注 + 管理员(token=admin)标注（仅本分享切片内的）。
+
+    每项附加 source 字段："me"（本人）或 "admin"。
+    """
+    share = _require_share(token)
+    share_slides = set(share.get("slides", []))
+    mine = share_store.list_rois(token)
+    admin_all = share_store.list_rois(share_store.ADMIN_TOKEN)
+    out = []
+    for r in mine:
+        rr = dict(r)
+        rr["source"] = "me"
+        out.append(rr)
+    for r in admin_all:
+        if r.get("slide") in share_slides:
+            rr = dict(r)
+            rr["source"] = "admin"
+            out.append(rr)
+    # 按时间倒序
+    out.sort(key=lambda x: x.get("ts", 0), reverse=True)
+    return jsonify(out)
 
 
 @app.route("/s/<token>/api/roi/<int:index>", methods=["DELETE"])
 def share_roi_delete(token, index):
+    """删除本 token 的标注；管理员标注不可由分享端删除。"""
     _require_share(token)
     ok = share_store.delete_roi(token, index)
     if not ok:

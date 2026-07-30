@@ -11,13 +11,15 @@
     roiMode: null,        // null | 6 | 6.5
     roi: { x: 0, y: 0, side: 0 },
     rotation: 0,
+    drawMode: null,       // null | "arrow" | "freehand"（与 roiMode 互斥）
+    showAnno: false,      // 是否在画布层显示已保存标注
   };
 
   // 缓存：全部切片、全部项目、全部分享
   var allSlides = [];      // [{name,width,height,mpp_x,...}]
   var allProjects = [];    // [{pid,name,note,slides,roi_count,...}]
   var currentAnnotations = null; // 当前切片的标注 {slide, annotations:[{label,count,items}]}
-  var annoOverlays = [];   // "显示全部标记"叠加的 overlay DOM
+  var annoOverlays = [];   // 兼容旧引用，已不再新增（标注改画到 canvas）
   var annoPanelOpen = false;
 
   // 临时选择器状态
@@ -42,6 +44,10 @@
     saveBtn: $("save-btn"),
     annoBtn: $("anno-btn"),
     annoAllBtn: $("anno-all-btn"),
+    annoArrowBtn: $("anno-arrow-btn"),
+    annoFreeBtn: $("anno-free-btn"),
+    annoLabelInput: $("anno-label-input"),
+    annoCanvas: $("anno-canvas"),
     resetBtn: $("reset-btn"),
     mppSetter: $("mpp-setter"),
     mppInput: $("mpp-input"),
@@ -226,8 +232,9 @@
     viewer.addHandler("zoom", function () { updateZoomBadge(); syncBaseThumb(); });
     viewer.addHandler("open", onViewerOpen);
     // 底图随平移/缩放实时跟随（animation 每帧触发，跟随最平滑）
-    viewer.addHandler("animation", syncBaseThumb);
-    viewer.addHandler("rotate", syncBaseThumb);
+    viewer.addHandler("animation", function () { syncBaseThumb(); redrawAnnoCanvas(); });
+    viewer.addHandler("rotate", function () { syncBaseThumb(); redrawAnnoCanvas(); });
+    viewer.addHandler("resize", redrawAnnoCanvas);
     // 切片关闭时清理旧底图
     viewer.addHandler("close", clearBaseThumb);
   }
@@ -236,14 +243,19 @@
     updateZoomBadge();
     // 打开后把底图缩略图对齐到当前视口
     syncBaseThumb();
-    // 打开新切片时清除标注叠加层与面板内容，重置按钮
-    clearAnnoOverlays();
+    // 打开新切片：退出绘制模式、清面板、重置标注画布尺寸
+    exitDrawMode();
+    resizeAnnoCanvas();
     els.annoBtn.disabled = true;
     els.annoAllBtn.disabled = true;
     els.annoPanel.style.display = "none";
     annoPanelOpen = false;
     els.annoAllBtn.classList.remove("active");
+    state.showAnno = false;
     if (state.slide) {
+      // 管理员标注工具在任意打开的切片上可用（箭头/描图不依赖 mpp）
+      els.annoArrowBtn.disabled = false;
+      els.annoFreeBtn.disabled = false;
       // 拉取该切片标注
       fetch("/api/annotations?slide=" + encodeURIComponent(state.slide.name))
         .then(function (r) { return r.json(); })
@@ -254,8 +266,13 @@
             els.annoBtn.disabled = false;
             els.annoAllBtn.disabled = false;
           }
+          redrawAnnoCanvas();
         })
-        .catch(function () { currentAnnotations = null; });
+        .catch(function () { currentAnnotations = null; redrawAnnoCanvas(); });
+    } else {
+      els.annoArrowBtn.disabled = true;
+      els.annoFreeBtn.disabled = true;
+      redrawAnnoCanvas();
     }
   }
 
@@ -323,7 +340,8 @@
         };
         state.mppX = info.mpp_x;
         state.rotation = 0;
-        els.currentSlide.textContent = info.name;
+        els.currentSlide.textContent = info.alias || info.name;
+        els.currentSlide.title = info.name + (info.note ? " · " + info.note : "");
         updateMppSetterVisibility();
         exitRoi();
         // 创建底图缩略图层：铺在瓦片 canvas 之前（下层），慢网下透出模糊预览
@@ -369,7 +387,7 @@
     state.rotation = (state.rotation + 90) % 360;
     viewer.viewport.setRotation(state.rotation);
     updateRoiOverlay();
-    refreshAnnoOverlays();
+    redrawAnnoCanvas();
   }
   function reset() {
     if (!viewer || !viewer.viewport) return;
@@ -390,6 +408,8 @@
       toast("缺少 mpp（µm/px），请先在工具栏设置 mpp", "error");
       return;
     }
+    // 进入 ROI 模式时退出箭头/描图绘制模式（互斥）
+    exitDrawMode();
     if (state.slide.mppSource === "estimated") {
       toast("提示：当前 mpp 为估算值，ROI 尺寸仅供参考", "info");
     }
@@ -780,13 +800,21 @@
     var mid = document.createElement("div");
     mid.className = "slide-mid";
     var failed = (unfiled && sinfo && sinfo.error) || (!sinfo);
+    var alias = (sinfo && sinfo.alias) || "";
 
-    // 第一行：文件名（左）+ 标注 pill（右），第二行：meta 独占整行
+    // 第一行：别名优先（无别名则截断文件名）+ 标注 pill，第二行：meta
     var top = document.createElement("div");
     top.className = "slide-top";
     var nameEl = document.createElement("span");
     nameEl.className = "slide-name";
-    nameEl.textContent = truncateMiddle(sname, 24) + (failed ? " (读取失败)" : "");
+    if (alias) {
+      nameEl.classList.add("alias-first");
+      nameEl.innerHTML = esc(alias) +
+        '<span class="alias-filename">' + esc(truncateMiddle(sname, 20)) + "</span>";
+      nameEl.title = sname + (failed ? "（读取失败）" : "");
+    } else {
+      nameEl.textContent = truncateMiddle(sname, 24) + (failed ? " (读取失败)" : "");
+    }
     top.appendChild(nameEl);
 
     // 标注 pill
@@ -808,11 +836,28 @@
 
     var meta = document.createElement("div");
     meta.className = "slide-meta";
-    meta.textContent = sinfo
-      ? slideMetaTags(sinfo) + (unfiled && sinfo.size_bytes ? " · " + fmtSize(sinfo.size_bytes) : "")
-      : "未找到";
+    var metaParts = [];
+    if (sinfo) {
+      metaParts.push(slideMetaTags(sinfo));
+      if (unfiled && sinfo.size_bytes) metaParts.push(fmtSize(sinfo.size_bytes));
+      if (sinfo.note) metaParts.push('<span class="sm-note">' + esc(sinfo.note) + "</span>");
+    } else {
+      metaParts.push("未找到");
+    }
+    meta.innerHTML = metaParts.join(" · ");
     mid.appendChild(meta);
     row.appendChild(mid);
+
+    // 别名/备注编辑钮（hover 浮现）
+    var editBtn = document.createElement("button");
+    editBtn.className = "slide-edit";
+    editBtn.textContent = "✎";
+    editBtn.title = "编辑别名/备注";
+    editBtn.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      enterSlideMetaEdit(row, sname, sinfo);
+    });
+    row.appendChild(editBtn);
 
     // 删除按钮（hover 浮现）
     var delBtn = document.createElement("button");
@@ -824,6 +869,64 @@
 
     row.addEventListener("click", function () { openSlide(sname); });
     return row;
+  }
+
+  // 行内别名/备注编辑态
+  function enterSlideMetaEdit(row, sname, sinfo) {
+    if (!row) return;
+    var alias0 = (sinfo && sinfo.alias) || "";
+    var note0 = (sinfo && sinfo.note) || "";
+    // 清空行内容，替换为编辑表单
+    row.innerHTML = "";
+    row.classList.add("editing");
+    row.removeEventListener("click", openSlide);
+    var form = document.createElement("div");
+    form.className = "slide-edit-form";
+    var aInput = document.createElement("input");
+    aInput.type = "text"; aInput.maxLength = 60; aInput.placeholder = "别名";
+    aInput.value = alias0;
+    var nInput = document.createElement("input");
+    nInput.type = "text"; nInput.maxLength = 200; nInput.placeholder = "备注";
+    nInput.value = note0;
+    var actions = document.createElement("div");
+    actions.className = "sef-actions";
+    var okBtn = document.createElement("button");
+    okBtn.className = "btn primary small"; okBtn.textContent = "确认";
+    var cancelBtn = document.createElement("button");
+    cancelBtn.className = "btn secondary small"; cancelBtn.textContent = "取消";
+    actions.appendChild(okBtn); actions.appendChild(cancelBtn);
+    form.appendChild(aInput); form.appendChild(nInput); form.appendChild(actions);
+    row.appendChild(form);
+    aInput.focus();
+
+    function commit() {
+      var alias = aInput.value;
+      var note = nInput.value;
+      fetch("/api/slide/" + encodeURIComponent(sname) + "/meta", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ alias: alias, note: note }),
+      })
+        .then(function (r) {
+          if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || "保存失败"); });
+          return r.json();
+        })
+        .then(function () {
+          toast("已更新", "success");
+          reloadProjectsAndUnfiled();
+        })
+        .catch(function (e) { toast("保存失败: " + e.message, "error"); });
+    }
+    okBtn.addEventListener("click", function (e) { e.stopPropagation(); commit(); });
+    cancelBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      reloadProjectsAndUnfiled();
+    });
+    aInput.addEventListener("keydown", function (e) { if (e.key === "Enter") nInput.focus(); });
+    nInput.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.stopPropagation(); commit(); }
+      if (e.key === "Escape") { e.stopPropagation(); reloadProjectsAndUnfiled(); }
+    });
   }
 
   function findSlideInfo(name) {
@@ -937,7 +1040,11 @@
       row.appendChild(cb);
       var info = document.createElement("span");
       info.className = "pi-info";
-      info.innerHTML = '<span class="pi-name">' + esc(truncateMiddle(s.name, 30)) + "</span>" +
+      var nameHtml = s.alias
+        ? '<span class="pi-alias">' + esc(s.alias) + "</span>" +
+          '<span class="alias-filename">' + esc(truncateMiddle(s.name, 24)) + "</span>"
+        : esc(truncateMiddle(s.name, 30));
+      info.innerHTML = '<span class="pi-name">' + nameHtml + "</span>" +
         '<span class="pi-meta">' + slideMetaTags(s) + "</span>";
       row.appendChild(info);
       els.pickerList.appendChild(row);
@@ -1160,6 +1267,322 @@
   }
 
   // =========================================================================
+  // 标注画布层（rect/arrow/freehand 统一绘制）
+  // =========================================================================
+  var annoCtx = null;
+
+  function resizeAnnoCanvas() {
+    var c = els.annoCanvas;
+    if (!c || !viewer) return;
+    var rect = viewer.container.getBoundingClientRect();
+    var dpr = window.devicePixelRatio || 1;
+    c.width = Math.max(1, Math.floor(rect.width * dpr));
+    c.height = Math.max(1, Math.floor(rect.height * dpr));
+    c.style.width = rect.width + "px";
+    c.style.height = rect.height + "px";
+    annoCtx = c.getContext("2d");
+    annoCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  // 把图像坐标转为画布层屏幕坐标（自带旋转支持）
+  function imgToCanvas(ix, iy) {
+    if (!viewer || !viewer.viewport) return { x: 0, y: 0 };
+    var p = viewer.viewport.imageToViewerElementCoordinates(
+      new OpenSeadragon.Point(ix, iy));
+    return { x: p.x, y: p.y };
+  }
+
+  // 当前切片的标注展开为扁平 item 列表（带 label/type/几何）
+  function flatAnnoItems() {
+    var out = [];
+    if (!currentAnnotations) return out;
+    (currentAnnotations.annotations || []).forEach(function (grp) {
+      (grp.items || []).forEach(function (it) {
+        var copy = {};
+        for (var k in it) copy[k] = it[k];
+        copy.label = grp.label;
+        out.push(copy);
+      });
+    });
+    return out;
+  }
+
+  function redrawAnnoCanvas() {
+    var c = els.annoCanvas;
+    if (!c || !annoCtx) { if (c) resizeAnnoCanvas(); }
+    if (!annoCtx) return;
+    var rect = viewer ? viewer.container.getBoundingClientRect() : { width: c.clientWidth, height: c.clientHeight };
+    annoCtx.clearRect(0, 0, rect.width, rect.height);
+    if (!state.showAnno && state.drawMode == null) return;
+    if (!state.slide) return;
+    // 已保存标注
+    if (state.showAnno) {
+      flatAnnoItems().forEach(function (it) {
+        drawAnnoItem(it, labelColor(it.label));
+      });
+    }
+    // 绘制中的预览
+    if (state.drawMode === "arrow" && drawPreview && drawPreview.type === "arrow") {
+      drawArrow(drawPreview.x1, drawPreview.y1, drawPreview.x2, drawPreview.y2, "#FFD700", "预览");
+    }
+    if (state.drawMode === "freehand" && drawPreview && drawPreview.type === "freehand" && drawPreview.points.length >= 2) {
+      drawFreehand(drawPreview.points, { fill: "rgba(255,215,0,0.12)", stroke: "#FFD700" }, "预览");
+    }
+  }
+
+  function drawAnnoItem(it, color) {
+    var typ = it.type || "rect";
+    if (typ === "rect") {
+      var tl = imgToCanvas(it.x, it.y);
+      var br = imgToCanvas(it.x + it.side_px, it.y + it.side_px);
+      var w = Math.abs(br.x - tl.x), h = Math.abs(br.y - tl.y);
+      var x = Math.min(tl.x, br.x), y = Math.min(tl.y, br.y);
+      annoCtx.lineWidth = 3;
+      annoCtx.strokeStyle = "#FFD700";
+      annoCtx.strokeRect(x, y, w, h);
+      // 角点
+      annoCtx.fillStyle = "#FFD700";
+      [[x, y], [x + w, y], [x, y + h], [x + w, y + h]].forEach(function (p) {
+        annoCtx.beginPath(); annoCtx.arc(p[0], p[1], 3, 0, Math.PI * 2); annoCtx.fill();
+      });
+      drawLabel(it.label, x, y, it.size_mm != null ? (it.size_mm + "mm") : "");
+    } else if (typ === "arrow") {
+      drawArrow(it.x1, it.y1, it.x2, it.y2, color.stroke, it.label);
+    } else if (typ === "freehand") {
+      drawFreehand(it.points, color, it.label);
+    }
+  }
+
+  function drawArrow(x1, y1, x2, y2, stroke, label) {
+    var a = imgToCanvas(x1, y1), b = imgToCanvas(x2, y2);
+    annoCtx.lineWidth = 3;
+    annoCtx.strokeStyle = stroke;
+    annoCtx.fillStyle = stroke;
+    annoCtx.beginPath();
+    annoCtx.moveTo(a.x, a.y);
+    annoCtx.lineTo(b.x, b.y);
+    annoCtx.stroke();
+    // 箭头三角头部（根据两端点屏幕坐标算角度）
+    var ang = Math.atan2(b.y - a.y, b.x - a.x);
+    var head = 12;
+    annoCtx.beginPath();
+    annoCtx.moveTo(b.x, b.y);
+    annoCtx.lineTo(b.x - head * Math.cos(ang - Math.PI / 6), b.y - head * Math.sin(ang - Math.PI / 6));
+    annoCtx.lineTo(b.x - head * Math.cos(ang + Math.PI / 6), b.y - head * Math.sin(ang + Math.PI / 6));
+    annoCtx.closePath();
+    annoCtx.fill();
+    if (label) drawLabel(label, b.x + 6, b.y - 6, "", stroke);
+  }
+
+  function drawFreehand(points, color, label) {
+    if (!points || points.length < 2) return;
+    annoCtx.lineWidth = 3;
+    annoCtx.strokeStyle = color.stroke;
+    annoCtx.fillStyle = color.fill || "rgba(0,0,0,0.12)";
+    annoCtx.beginPath();
+    var p0 = imgToCanvas(points[0][0], points[0][1]);
+    annoCtx.moveTo(p0.x, p0.y);
+    for (var i = 1; i < points.length; i++) {
+      var p = imgToCanvas(points[i][0], points[i][1]);
+      annoCtx.lineTo(p.x, p.y);
+    }
+    annoCtx.closePath();
+    annoCtx.fill();
+    annoCtx.stroke();
+    if (label) drawLabel(label, p0.x, p0.y, "", color.stroke);
+  }
+
+  // 标签文字：黄底深字（与现有 ROI 标签风格一致）
+  function drawLabel(label, x, y, sizeText, strokeColor) {
+    var text = String(label || "");
+    if (sizeText) text = (text ? text + " · " : "") + sizeText;
+    if (!text) return;
+    annoCtx.font = "600 11px " + "-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif";
+    var padX = 5, padY = 3;
+    var m = annoCtx.measureText(text);
+    var w = m.width + padX * 2;
+    var h = 16;
+    var bx = x, by = y - h - 2;
+    if (strokeColor && strokeColor !== "#FFD700") {
+      annoCtx.fillStyle = strokeColor;
+    } else {
+      annoCtx.fillStyle = "#FFD700";
+    }
+    annoCtx.fillRect(bx, by, w, h);
+    annoCtx.fillStyle = (strokeColor && strokeColor !== "#FFD700") ? "#fff" : "#5a3500";
+    annoCtx.textBaseline = "middle";
+    annoCtx.fillText(text, bx + padX, by + h / 2 + 0.5);
+  }
+
+  // ---------- 显示全部标记（切换画布层显隐） ----------
+  function toggleAnnoAll() {
+    state.showAnno = !state.showAnno;
+    els.annoAllBtn.classList.toggle("active", state.showAnno);
+    redrawAnnoCanvas();
+  }
+  // 旧函数别名（兼容）
+  function clearAnnoOverlays() { annoOverlays = []; redrawAnnoCanvas(); }
+  function refreshAnnoOverlays() { redrawAnnoCanvas(); }
+
+  // =========================================================================
+  // 标注绘制工具（arrow / freehand）
+  // =========================================================================
+  var drawPreview = null;     // {type, ...}
+  var drawPointer = null;     // 当前指针捕获信息
+
+  function enterDrawMode(mode) {
+    if (!state.slide) { toast("请先打开一个切片", "error"); return; }
+    exitRoi();
+    state.drawMode = mode;
+    els.annoArrowBtn.classList.toggle("active", mode === "arrow");
+    els.annoFreeBtn.classList.toggle("active", mode === "freehand");
+    var c = els.annoCanvas;
+    c.classList.add("drawing");
+    if (viewer) viewer.setMouseNavEnabled(false);
+    state.showAnno = true;
+    els.annoAllBtn.classList.add("active");
+    redrawAnnoCanvas();
+    toast(mode === "arrow" ? "箭头模式：拖动绘制" : "描图模式：沿边缘描绘", "info");
+  }
+
+  function exitDrawMode() {
+    state.drawMode = null;
+    drawPreview = null;
+    drawPointer = null;
+    els.annoArrowBtn.classList.remove("active");
+    els.annoFreeBtn.classList.remove("active");
+    if (els.annoCanvas) els.annoCanvas.classList.remove("drawing");
+    if (viewer) viewer.setMouseNavEnabled(true);
+    redrawAnnoCanvas();
+  }
+
+  function toggleDrawMode(mode) {
+    if (state.drawMode === mode) { exitDrawMode(); return; }
+    enterDrawMode(mode);
+  }
+
+  function onAnnoPointerDown(e) {
+    if (!state.drawMode || !state.slide) return;
+    e.preventDefault(); e.stopPropagation();
+    var c = els.annoCanvas;
+    try { c.setPointerCapture(e.pointerId); } catch (err) {}
+    drawPointer = { id: e.pointerId };
+    var img = screenToImg(e);
+    if (state.drawMode === "arrow") {
+      drawPreview = { type: "arrow", x1: img.x, y1: img.y, x2: img.x, y2: img.y };
+    } else {
+      drawPreview = { type: "freehand", points: [[img.x, img.y]], lastScreen: screenPt(e) };
+    }
+    redrawAnnoCanvas();
+  }
+
+  function onAnnoPointerMove(e) {
+    if (!state.drawMode || !drawPreview) return;
+    e.preventDefault(); e.stopPropagation();
+    var img = screenToImg(e);
+    if (drawPreview.type === "arrow") {
+      drawPreview.x2 = img.x; drawPreview.y2 = img.y;
+    } else {
+      var sp = screenPt(e);
+      var last = drawPreview.lastScreen;
+      // 距上一点 > 4 屏幕像素才采样
+      if (Math.hypot(sp.x - last.x, sp.y - last.y) > 4) {
+        drawPreview.points.push([img.x, img.y]);
+        drawPreview.lastScreen = sp;
+        // 超过 500 点自动收尾
+        if (drawPreview.points.length >= 500) { finishDraw(); return; }
+      }
+    }
+    redrawAnnoCanvas();
+  }
+
+  function onAnnoPointerUp(e) {
+    if (!state.drawMode || !drawPreview) return;
+    e.preventDefault(); e.stopPropagation();
+    finishDraw();
+  }
+
+  function finishDraw() {
+    var dp = drawPreview;
+    var c = els.annoCanvas;
+    if (drawPointer) { try { c.releasePointerCapture(drawPointer.id); } catch (err) {} }
+    drawPointer = null;
+    drawPreview = null;
+    if (!dp) { exitDrawMode(); return; }
+    if (dp.type === "arrow") {
+      var dist = Math.hypot(dp.x2 - dp.x1, dp.y2 - dp.y1);
+      if (dist < 10) { toast("距离过短，已取消", "info"); exitDrawMode(); return; }
+      saveAnnotation({ type: "arrow", x1: dp.x1, y1: dp.y1, x2: dp.x2, y2: dp.y2 });
+    } else {
+      var pts = dp.points;
+      if (pts.length < 3) { toast("描图点太少，已取消", "info"); exitDrawMode(); return; }
+      // 包围盒 > 10px
+      var xs = pts.map(function (p) { return p[0]; });
+      var ys = pts.map(function (p) { return p[1]; });
+      var bb = Math.max(Math.max.apply(null, xs) - Math.min.apply(null, xs),
+                        Math.max.apply(null, ys) - Math.min.apply(null, ys));
+      if (bb < 10) { toast("描图范围太小，已取消", "info"); exitDrawMode(); return; }
+      saveAnnotation({ type: "freehand", points: pts });
+    }
+  }
+
+  // 屏幕坐标 → 图像坐标
+  function screenToImg(e) {
+    var rect = viewer.container.getBoundingClientRect();
+    var p = viewer.viewport.viewerElementToImageCoordinates(
+      new OpenSeadragon.Point(e.clientX - rect.left, e.clientY - rect.top));
+    return { x: Math.round(p.x), y: Math.round(p.y) };
+  }
+  function screenPt(e) {
+    var rect = viewer.container.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+
+  // 保存管理员标注
+  function saveAnnotation(geom) {
+    if (!state.slide) return;
+    var label = (els.annoLabelInput.value || "").trim();
+    if (!label) label = "管理员";
+    var body = { slide: state.slide.name, type: geom.type, label: label };
+    for (var k in geom) body[k] = geom[k];
+    fetch("/api/annotation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+      .then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || "保存失败"); });
+        return r.json();
+      })
+      .then(function () {
+        toast("标注已保存", "success");
+        exitDrawMode();
+        refreshCurrentAnnotations();
+        loadAnnotationsIndex().then(function () {
+          renderProjects(allProjects);
+          renderUnfiled();
+        });
+      })
+      .catch(function (e) { toast("保存失败: " + e.message, "error"); exitDrawMode(); });
+  }
+
+  // 重新拉取当前切片标注并重绘
+  function refreshCurrentAnnotations() {
+    if (!state.slide) { redrawAnnoCanvas(); return; }
+    fetch("/api/annotations?slide=" + encodeURIComponent(state.slide.name))
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        currentAnnotations = data;
+        var annos = data.annotations || [];
+        els.annoBtn.disabled = annos.length === 0;
+        els.annoAllBtn.disabled = annos.length === 0;
+        if (annos.length === 0) { state.showAnno = false; els.annoAllBtn.classList.remove("active"); }
+        redrawAnnoCanvas();
+      })
+      .catch(function () {});
+  }
+
+  // =========================================================================
   // 标注面板 + 全部标记叠加（查看器）
   // =========================================================================
   function openAnnoPanel() {
@@ -1197,10 +1620,15 @@
         row.className = "anno-item";
         var left = document.createElement("div");
         left.className = "ai-info";
+        var typIcon = (it.type === "arrow") ? "↗" : (it.type === "freehand" ? "〰" : "▭");
+        var sizeStr = "";
+        if ((it.type || "rect") === "rect" && it.size_mm != null) sizeStr = " · " + it.size_mm + "mm";
+        else if (it.type === "arrow") sizeStr = " · (" + it.x1 + "," + it.y1 + ")→(" + it.x2 + "," + it.y2 + ")";
+        else if (it.type === "freehand") sizeStr = " · " + (it.points ? it.points.length : 0) + "点";
         left.innerHTML =
-          '<div class="ai-title"><span class="ai-label">' + esc(grp.label) + "</span> · " +
-          (it.size_mm != null ? it.size_mm + "mm" : "") + "</div>" +
-          '<div class="ai-sub">(' + it.x + "," + it.y + ") " + fmtTime(it.ts) +
+          '<div class="ai-title"><span class="ai-type-icon">' + typIcon + "</span>" +
+          '<span class="ai-label">' + esc(grp.label) + "</span>" + sizeStr + "</div>" +
+          '<div class="ai-sub">' + fmtTime(it.ts) +
           (it.token ? " · 来源 " + String(it.token).slice(0, 6) : "") + "</div>";
         row.appendChild(left);
         row.style.cursor = "pointer";
@@ -1218,12 +1646,29 @@
       " " + p(d.getHours()) + ":" + p(d.getMinutes());
   }
 
-  // 点击标注条目：fitBounds + 临时重建黄色 ROI 框
+  // 点击标注条目：fitBounds（按类型算包围盒）+ 临时重建黄色 ROI 框
   function jumpToAnno(it) {
     if (!state.slide || !viewer || !viewer.viewport) return;
-    var x = it.x, y = it.y, side = it.side_px;
+    var typ = it.type || "rect";
+    var x, y, side;
+    if (typ === "arrow") {
+      x = Math.min(it.x1, it.x2); y = Math.min(it.y1, it.y2);
+      side = Math.max(Math.abs(it.x2 - it.x1), Math.abs(it.y2 - it.y1));
+      side = Math.max(side, 1);
+    } else if (typ === "freehand") {
+      var xs = it.points.map(function (p) { return p[0]; });
+      var ys = it.points.map(function (p) { return p[1]; });
+      x = Math.min.apply(null, xs); y = Math.min.apply(null, ys);
+      side = Math.max(Math.max.apply(null, xs) - x, Math.max.apply(null, ys) - y);
+      side = Math.max(side, 1);
+    } else {
+      x = it.x; y = it.y; side = it.side_px;
+    }
+    // 扩 20% 边距
+    var pad = side * 0.2;
     try {
-      var rect = viewer.viewport.imageToViewportRectangle(x, y, side, side);
+      var rect = viewer.viewport.imageToViewportRectangle(
+        x - pad, y - pad, side + pad * 2, side + pad * 2);
       viewer.viewport.fitBounds(rect);
     } catch (e) {}
     // 临时 ROI 框（仅视觉，不进入保存态）
@@ -1240,72 +1685,6 @@
     var lbl = roiBox.querySelector(".roi-label");
     if (lbl && sizeMm != null) lbl.textContent = sizeMm + "mm × " + sizeMm + "mm";
     updateRoiOverlay();
-  }
-
-  // "显示全部标记"叠加
-  function toggleAnnoAll() {
-    if (annoOverlays.length > 0) {
-      clearAnnoOverlays();
-      els.annoAllBtn.classList.remove("active");
-      return;
-    }
-    if (!state.slide || !currentAnnotations) return;
-    var groups = currentAnnotations.annotations || [];
-    groups.forEach(function (grp) {
-      var color = labelColor(grp.label);
-      (grp.items || []).forEach(function (it) {
-        addAnnoOverlay(it, grp.label, color);
-      });
-    });
-    els.annoAllBtn.classList.toggle("active", annoOverlays.length > 0);
-  }
-
-  function addAnnoOverlay(it, label, color) {
-    if (!viewer || !state.slide) return;
-    var box = document.createElement("div");
-    box.className = "anno-overlay-box";
-    box.style.background = color.fill;
-    box.style.border = "2px solid " + color.stroke;
-    var tag = document.createElement("div");
-    tag.className = "anno-overlay-tag";
-    tag.textContent = label;
-    tag.style.background = color.stroke;
-    box.appendChild(tag);
-    viewer.container.appendChild(box);
-    try {
-      var rect = viewer.viewport.imageToViewportRectangle(it.x, it.y, it.side_px, it.side_px);
-      viewer.addOverlay({
-        element: box,
-        location: rect,
-        placement: OpenSeadragon.Placement.TOP_LEFT,
-      });
-      annoOverlays.push(box);
-    } catch (e) {
-      if (box.parentNode) box.parentNode.removeChild(box);
-    }
-  }
-
-  function clearAnnoOverlays() {
-    if (!viewer) { annoOverlays = []; return; }
-    annoOverlays.forEach(function (box) {
-      try { viewer.removeOverlay(box); } catch (e) {}
-      if (box.parentNode) box.parentNode.removeChild(box);
-    });
-    annoOverlays = [];
-  }
-
-  function refreshAnnoOverlays() {
-    if (annoOverlays.length === 0) return;
-    // 简化：旋转时移除并重建（位置基于当前视口重新计算）
-    if (!state.slide || !currentAnnotations) { clearAnnoOverlays(); return; }
-    var groups = currentAnnotations.annotations || [];
-    // 记录当前可见性后重建
-    clearAnnoOverlays();
-    groups.forEach(function (grp) {
-      var color = labelColor(grp.label);
-      (grp.items || []).forEach(function (it) { addAnnoOverlay(it, grp.label, color); });
-    });
-    els.annoAllBtn.classList.toggle("active", annoOverlays.length > 0);
   }
 
   // ---------- 删除切片 ----------
@@ -1400,6 +1779,16 @@
     });
     els.annoPanelClose.addEventListener("click", closeAnnoPanel);
     els.annoAllBtn.addEventListener("click", toggleAnnoAll);
+    els.annoArrowBtn.addEventListener("click", function () { toggleDrawMode("arrow"); });
+    els.annoFreeBtn.addEventListener("click", function () { toggleDrawMode("freehand"); });
+
+    // 标注画布层绘制事件
+    var c = els.annoCanvas;
+    c.addEventListener("pointerdown", onAnnoPointerDown);
+    c.addEventListener("pointermove", onAnnoPointerMove);
+    c.addEventListener("pointerup", onAnnoPointerUp);
+    c.addEventListener("pointercancel", onAnnoPointerUp);
+    window.addEventListener("resize", function () { resizeAnnoCanvas(); redrawAnnoCanvas(); });
 
     // 新建项目
     els.newProjectBtn.addEventListener("click", function () {

@@ -268,7 +268,10 @@ def _read_metadata(osr: OpenSlide, path: Path) -> dict:
 
 
 def _slide_info_dict(name: str) -> dict:
-    """构建单个切片的元数据字典（用于列表与 info 接口）。"""
+    """构建单个切片的元数据字典（用于列表与 info 接口）。
+
+    附加 alias/note（来自 slide_meta，无则空串）。
+    """
     safe = _safe_name(name)
     path = UPLOAD_DIR / safe
     base = {"name": safe, "size_bytes": path.stat().st_size}
@@ -288,8 +291,14 @@ def _slide_info_dict(name: str) -> dict:
                 "error": str(e),
             }
         )
+        sm = share_store.get_slide_meta(safe)
+        base["alias"] = sm.get("alias", "")
+        base["note"] = sm.get("note", "")
         return base
     base.update(meta)
+    sm = share_store.get_slide_meta(safe)
+    base["alias"] = sm.get("alias", "")
+    base["note"] = sm.get("note", "")
     return base
 
 
@@ -314,6 +323,7 @@ def api_slides():
             items.append(_slide_info_dict(child.name))
         except Exception as e:
             # 路径穿越校验等可能抛出 HTTP 异常，这里收集为 error
+            sm = share_store.get_slide_meta(child.name)
             items.append(
                 {
                     "name": child.name,
@@ -324,6 +334,8 @@ def api_slides():
                     "mpp_y": None,
                     "objective": None,
                     "mpp_source": "missing",
+                    "alias": sm.get("alias", ""),
+                    "note": sm.get("note", ""),
                     "error": str(getattr(e, "description", e)),
                 }
             )
@@ -726,6 +738,7 @@ def api_annotations():
       - slide=<name>：只返回该切片的标注分组
       - project=<pid>：只返回该项目内切片的标注
     同时传 slide 与 project 时，slide 优先（且需属于项目）。
+    items 已含 type 与全部几何字段（经 store 自动带）。
     """
     slide = request.args.get("slide")
     project = request.args.get("project")
@@ -743,6 +756,92 @@ def api_annotations():
 
     # 默认返回全部
     return jsonify({"by_slide": share_store.annotations_by_slide()})
+
+
+# --------------------------------------------------------------------------- #
+# 样本别名/备注 API（管理员）
+# --------------------------------------------------------------------------- #
+@app.route("/api/slide/<name>/meta", methods=["POST"])
+def api_slide_meta(name):
+    """设置切片的别名/备注。JSON: {alias?, note?}（None 不改，空串清除）。
+
+    name 需为已存在的切片文件。
+    """
+    safe = _safe_name(name)
+    body = request.get_json(silent=True) or {}
+    alias = body.get("alias", None)
+    note = body.get("note", None)
+    # alias/note 仅接受字符串或 None
+    if alias is not None and not isinstance(alias, str):
+        return jsonify(error="alias 需为字符串"), 400
+    if note is not None and not isinstance(note, str):
+        return jsonify(error="note 需为字符串"), 400
+    meta = share_store.set_slide_meta(safe, alias=alias, note=note)
+    return jsonify(ok=True, meta=meta)
+
+
+# --------------------------------------------------------------------------- #
+# 标注 API（管理员直接在切片上做 rect/arrow/freehand 标注）
+# --------------------------------------------------------------------------- #
+@app.route("/api/annotation", methods=["POST"])
+def api_annotation_add():
+    """管理员新增标注。JSON: {slide, type?, label?, ...geometry}。
+
+    token 固定为 "admin"，label 默认 "管理员"。slide 必须存在。
+    几何字段随 type 不同：rect(x,y,side_px,size_mm) / arrow(x1,y1,x2,y2) /
+    freehand(points)。
+    """
+    body = request.get_json(silent=True) or {}
+    slide = body.get("slide")
+    if not isinstance(slide, str) or not slide:
+        return jsonify(error="缺少 slide"), 400
+    safe = _sanitize_name(slide)
+    if not safe or safe != slide:
+        return jsonify(error="非法文件名"), 400
+    if not (UPLOAD_DIR / safe).is_file():
+        return jsonify(error="切片不存在"), 404
+
+    typ = body.get("type", "rect")
+    if typ not in share_store.ROI_TYPES:
+        return jsonify(error="未知标注类型"), 400
+    label = body.get("label")
+    if label is None:
+        label = "管理员"
+    if not isinstance(label, str):
+        return jsonify(error="label 需为字符串"), 400
+
+    # 收集几何字段（透传给 add_roi 校验）
+    geom = {}
+    for k in ("x", "y", "side_px", "size_mm", "x1", "y1", "x2", "y2", "points"):
+        if k in body:
+            geom[k] = body[k]
+    try:
+        roi = share_store.add_roi(
+            share_store.ADMIN_TOKEN, safe, label, type=typ, **geom
+        )
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(ok=True, index=roi["index"])
+
+
+@app.route("/api/annotation/admin/<int:index>", methods=["DELETE"])
+def api_annotation_delete_admin(index):
+    """管理员删除自己的标注（token="admin" 下第 index 条）。"""
+    ok = share_store.delete_roi(share_store.ADMIN_TOKEN, index)
+    if not ok:
+        return jsonify(error="标注不存在"), 404
+    return jsonify(ok=True)
+
+
+@app.route("/api/annotation/<token>/<int:index>", methods=["DELETE"])
+def api_annotation_delete(token, index):
+    """管理员删除任意 token 的标注。token 仅允许非空字符串。"""
+    if not isinstance(token, str) or not token:
+        return jsonify(error="缺少 token"), 400
+    ok = share_store.delete_roi(token, index)
+    if not ok:
+        return jsonify(error="标注不存在"), 404
+    return jsonify(ok=True)
 
 
 if __name__ == "__main__":

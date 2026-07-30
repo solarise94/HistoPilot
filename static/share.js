@@ -21,6 +21,8 @@
     roiMode: null,
     roi: { x: 0, y: 0, side: 0 },
     rotation: 0,
+    drawMode: null,      // null | "arrow" | "freehand"（与 roiMode 互斥）
+    showAnno: true,      // 默认始终显示（用户需要看到管理员标记）
   };
 
   var viewer = null;
@@ -28,6 +30,8 @@
   var dragInfo = null;
   // 底图缩略图层：铺在瓦片层后面的模糊预览，慢网下避免瓦片未到区域变白
   var baseThumbEl = null;
+  // 当前切片的标注（本 token + 管理员），扁平数组
+  var currentRois = [];
 
   // ---------- DOM ----------
   function $(id) { return document.getElementById(id); }
@@ -50,8 +54,13 @@
     roiLabel: $("roi-label"),
     panelToggle: $("roi-panel-toggle"),
     panel: $("roi-panel"),
+    panelMask: $("roi-panel-mask"),
     panelClose: $("roi-panel-close"),
     panelList: $("roi-panel-list"),
+    annoArrowBtn: $("anno-arrow-btn"),
+    annoFreeBtn: $("anno-free-btn"),
+    annoAllBtn: $("anno-all-btn"),
+    annoCanvas: $("anno-canvas"),
     toastContainer: $("toast-container"),
   };
 
@@ -70,6 +79,23 @@
   function clamp(v, lo, hi) {
     if (hi < lo) hi = lo;
     return Math.max(lo, Math.min(hi, v));
+  }
+
+  // label -> 颜色（哈希着色）
+  function labelColor(label) {
+    var s = String(label || "");
+    var h = 0;
+    for (var i = 0; i < s.length; i++) {
+      h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    }
+    var hue = h % 360;
+    return { fill: "hsla(" + hue + ",70%,55%,0.12)", stroke: "hsl(" + hue + ",70%,45%)" };
+  }
+
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
   // ---------- 初始化 OpenSeadragon ----------
@@ -111,10 +137,17 @@
     // 图外空白区用深色背景，减少慢网下大面积空白的刺眼感
     viewer.container.style.backgroundColor = "#262a30";
     viewer.addHandler("zoom", function () { updateZoomBadge(); syncBaseThumb(); });
-    viewer.addHandler("open", function () { updateZoomBadge(); syncBaseThumb(); });
+    viewer.addHandler("open", function () {
+      updateZoomBadge(); syncBaseThumb();
+      exitDrawMode();
+      resizeAnnoCanvas();
+      // 打开后加载标注并重绘
+      loadCurrentRois();
+    });
     // 底图随平移/缩放实时跟随（animation 每帧触发，跟随最平滑）
-    viewer.addHandler("animation", syncBaseThumb);
-    viewer.addHandler("rotate", syncBaseThumb);
+    viewer.addHandler("animation", function () { syncBaseThumb(); redrawAnnoCanvas(); });
+    viewer.addHandler("rotate", function () { syncBaseThumb(); redrawAnnoCanvas(); });
+    viewer.addHandler("resize", redrawAnnoCanvas);
     // 切片关闭时清理旧底图
     viewer.addHandler("close", clearBaseThumb);
   }
@@ -171,8 +204,9 @@
     state.slides.forEach(function (s) {
       var chip = document.createElement("div");
       chip.className = "chip";
-      chip.textContent = s.name;
-      chip.title = s.name + (s.error ? "（读取失败）" : "");
+      var display = s.alias || s.name;
+      chip.textContent = display;
+      chip.title = (s.alias ? s.alias + " (" + s.name + ")" : s.name) + (s.error ? "（读取失败）" : "");
       chip.dataset.name = s.name;
       if (state.slide && state.slide.name === s.name) {
         chip.classList.add("active");
@@ -235,7 +269,8 @@
     state.mppX = info.mpp_x;
     state.rotation = 0;
 
-    els.currentSlide.textContent = info.name;
+    els.currentSlide.textContent = info.alias || info.name;
+    els.currentSlide.title = info.name + (info.note ? " · " + info.note : "");
     updateMppSetterVisibility();
     exitRoi();
 
@@ -283,6 +318,7 @@
     state.rotation = (state.rotation + 90) % 360;
     viewer.viewport.setRotation(state.rotation);
     updateRoiOverlay();
+    redrawAnnoCanvas();
   }
   function reset() {
     if (!viewer || !viewer.viewport) return;
@@ -306,6 +342,8 @@
     if (state.slide.mppSource === "estimated") {
       toast("提示：当前 mpp 为估算值，ROI 尺寸仅供参考", "info");
     }
+    // 进入 ROI 模式时退出箭头/描图绘制模式（互斥）
+    exitDrawMode();
     if (state.roiMode === sizeMm) { exitRoi(); return; }
 
     var newSide = roiSide(sizeMm);
@@ -479,7 +517,7 @@
     return viewer.container.getBoundingClientRect();
   }
 
-  // ---------- 保存选区 ----------
+  // ---------- 保存选区（rect ROI） ----------
   function saveRoi() {
     if (!state.slide || state.roiMode == null) return;
     // label 必填校验
@@ -495,6 +533,7 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         slide: state.slide.name,
+        type: "rect",
         x: Math.round(r.x),
         y: Math.round(r.y),
         size_mm: state.roiMode,
@@ -513,6 +552,7 @@
       .then(function () {
         toast("选区已保存", "success");
         loadRoiPanel();
+        loadCurrentRois();
       })
       .catch(function (e) { toast("保存失败: " + e.message, "error"); });
   }
@@ -585,6 +625,287 @@
     toast("mpp 已设为 " + v + " µm/px", "success");
   }
 
+  // =========================================================================
+  // 标注画布层（rect/arrow/freehand 统一绘制）
+  // =========================================================================
+  var annoCtx = null;
+
+  function resizeAnnoCanvas() {
+    var c = els.annoCanvas;
+    if (!c || !viewer) return;
+    var rect = viewer.container.getBoundingClientRect();
+    var dpr = window.devicePixelRatio || 1;
+    c.width = Math.max(1, Math.floor(rect.width * dpr));
+    c.height = Math.max(1, Math.floor(rect.height * dpr));
+    c.style.width = rect.width + "px";
+    c.style.height = rect.height + "px";
+    annoCtx = c.getContext("2d");
+    annoCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function imgToCanvas(ix, iy) {
+    if (!viewer || !viewer.viewport) return { x: 0, y: 0 };
+    var p = viewer.viewport.imageToViewerElementCoordinates(
+      new OpenSeadragon.Point(ix, iy));
+    return { x: p.x, y: p.y };
+  }
+
+  function redrawAnnoCanvas() {
+    var c = els.annoCanvas;
+    if (!c || !annoCtx) { if (c) resizeAnnoCanvas(); }
+    if (!annoCtx) return;
+    var rect = viewer ? viewer.container.getBoundingClientRect() : { width: c.clientWidth, height: c.clientHeight };
+    annoCtx.clearRect(0, 0, rect.width, rect.height);
+    if (!state.showAnno && state.drawMode == null) return;
+    if (!state.slide) return;
+    // 已保存标注
+    if (state.showAnno) {
+      currentRois.forEach(function (it) {
+        drawAnnoItem(it, labelColor(it.label));
+      });
+    }
+    // 绘制中预览
+    if (state.drawMode === "arrow" && drawPreview && drawPreview.type === "arrow") {
+      drawArrow(drawPreview.x1, drawPreview.y1, drawPreview.x2, drawPreview.y2, "#FFD700", "预览");
+    }
+    if (state.drawMode === "freehand" && drawPreview && drawPreview.type === "freehand" && drawPreview.points.length >= 2) {
+      drawFreehand(drawPreview.points, { fill: "rgba(255,215,0,0.12)", stroke: "#FFD700" }, "预览");
+    }
+  }
+
+  function drawAnnoItem(it, color) {
+    var typ = it.type || "rect";
+    if (typ === "rect") {
+      var tl = imgToCanvas(it.x, it.y);
+      var br = imgToCanvas(it.x + it.side_px, it.y + it.side_px);
+      var w = Math.abs(br.x - tl.x), h = Math.abs(br.y - tl.y);
+      var x = Math.min(tl.x, br.x), y = Math.min(tl.y, br.y);
+      annoCtx.lineWidth = 3;
+      annoCtx.strokeStyle = "#FFD700";
+      annoCtx.strokeRect(x, y, w, h);
+      annoCtx.fillStyle = "#FFD700";
+      [[x, y], [x + w, y], [x, y + h], [x + w, y + h]].forEach(function (p) {
+        annoCtx.beginPath(); annoCtx.arc(p[0], p[1], 3, 0, Math.PI * 2); annoCtx.fill();
+      });
+      drawLabel(it.label, x, y, it.size_mm != null ? (it.size_mm + "mm") : "");
+    } else if (typ === "arrow") {
+      drawArrow(it.x1, it.y1, it.x2, it.y2, color.stroke, it.label);
+    } else if (typ === "freehand") {
+      drawFreehand(it.points, color, it.label);
+    }
+  }
+
+  function drawArrow(x1, y1, x2, y2, stroke, label) {
+    var a = imgToCanvas(x1, y1), b = imgToCanvas(x2, y2);
+    annoCtx.lineWidth = 3;
+    annoCtx.strokeStyle = stroke;
+    annoCtx.fillStyle = stroke;
+    annoCtx.beginPath();
+    annoCtx.moveTo(a.x, a.y);
+    annoCtx.lineTo(b.x, b.y);
+    annoCtx.stroke();
+    var ang = Math.atan2(b.y - a.y, b.x - a.x);
+    var head = 12;
+    annoCtx.beginPath();
+    annoCtx.moveTo(b.x, b.y);
+    annoCtx.lineTo(b.x - head * Math.cos(ang - Math.PI / 6), b.y - head * Math.sin(ang - Math.PI / 6));
+    annoCtx.lineTo(b.x - head * Math.cos(ang + Math.PI / 6), b.y - head * Math.sin(ang + Math.PI / 6));
+    annoCtx.closePath();
+    annoCtx.fill();
+    if (label) drawLabel(label, b.x + 6, b.y - 6, "", stroke);
+  }
+
+  function drawFreehand(points, color, label) {
+    if (!points || points.length < 2) return;
+    annoCtx.lineWidth = 3;
+    annoCtx.strokeStyle = color.stroke;
+    annoCtx.fillStyle = color.fill || "rgba(0,0,0,0.12)";
+    annoCtx.beginPath();
+    var p0 = imgToCanvas(points[0][0], points[0][1]);
+    annoCtx.moveTo(p0.x, p0.y);
+    for (var i = 1; i < points.length; i++) {
+      var p = imgToCanvas(points[i][0], points[i][1]);
+      annoCtx.lineTo(p.x, p.y);
+    }
+    annoCtx.closePath();
+    annoCtx.fill();
+    annoCtx.stroke();
+    if (label) drawLabel(label, p0.x, p0.y, "", color.stroke);
+  }
+
+  function drawLabel(label, x, y, sizeText, strokeColor) {
+    var text = String(label || "");
+    if (sizeText) text = (text ? text + " · " : "") + sizeText;
+    if (!text) return;
+    annoCtx.font = "600 11px " + "-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif";
+    var padX = 5;
+    var m = annoCtx.measureText(text);
+    var w = m.width + padX * 2;
+    var h = 16;
+    var bx = x, by = y - h - 2;
+    annoCtx.fillStyle = (strokeColor && strokeColor !== "#FFD700") ? strokeColor : "#FFD700";
+    annoCtx.fillRect(bx, by, w, h);
+    annoCtx.fillStyle = (strokeColor && strokeColor !== "#FFD700") ? "#fff" : "#5a3500";
+    annoCtx.textBaseline = "middle";
+    annoCtx.fillText(text, bx + padX, by + h / 2 + 0.5);
+  }
+
+  // ---------- 显示/隐藏标记（默认开） ----------
+  function toggleAnnoAll() {
+    state.showAnno = !state.showAnno;
+    els.annoAllBtn.classList.toggle("active", state.showAnno);
+    redrawAnnoCanvas();
+  }
+
+  // ---------- 绘制工具（arrow / freehand） ----------
+  var drawPreview = null;
+  var drawPointer = null;
+
+  function enterDrawMode(mode) {
+    if (!state.slide) { toast("请先打开一个切片", "error"); return; }
+    exitRoi();
+    state.drawMode = mode;
+    els.annoArrowBtn.classList.toggle("active", mode === "arrow");
+    els.annoFreeBtn.classList.toggle("active", mode === "freehand");
+    els.annoCanvas.classList.add("drawing");
+    if (viewer) viewer.setMouseNavEnabled(false);
+    state.showAnno = true;
+    els.annoAllBtn.classList.add("active");
+    redrawAnnoCanvas();
+    toast(mode === "arrow" ? "箭头模式：拖动绘制" : "描图模式：沿边缘描绘", "info");
+  }
+
+  function exitDrawMode() {
+    state.drawMode = null;
+    drawPreview = null;
+    drawPointer = null;
+    if (els.annoArrowBtn) els.annoArrowBtn.classList.remove("active");
+    if (els.annoFreeBtn) els.annoFreeBtn.classList.remove("active");
+    if (els.annoCanvas) els.annoCanvas.classList.remove("drawing");
+    if (viewer) viewer.setMouseNavEnabled(true);
+    redrawAnnoCanvas();
+  }
+
+  function toggleDrawMode(mode) {
+    if (state.drawMode === mode) { exitDrawMode(); return; }
+    enterDrawMode(mode);
+  }
+
+  function onAnnoPointerDown(e) {
+    if (!state.drawMode || !state.slide) return;
+    e.preventDefault(); e.stopPropagation();
+    var c = els.annoCanvas;
+    try { c.setPointerCapture(e.pointerId); } catch (err) {}
+    drawPointer = { id: e.pointerId };
+    var img = screenToImg(e);
+    if (state.drawMode === "arrow") {
+      drawPreview = { type: "arrow", x1: img.x, y1: img.y, x2: img.x, y2: img.y };
+    } else {
+      drawPreview = { type: "freehand", points: [[img.x, img.y]], lastScreen: screenPt(e) };
+    }
+    redrawAnnoCanvas();
+  }
+
+  function onAnnoPointerMove(e) {
+    if (!state.drawMode || !drawPreview) return;
+    e.preventDefault(); e.stopPropagation();
+    var img = screenToImg(e);
+    if (drawPreview.type === "arrow") {
+      drawPreview.x2 = img.x; drawPreview.y2 = img.y;
+    } else {
+      var sp = screenPt(e);
+      var last = drawPreview.lastScreen;
+      if (Math.hypot(sp.x - last.x, sp.y - last.y) > 4) {
+        drawPreview.points.push([img.x, img.y]);
+        drawPreview.lastScreen = sp;
+        if (drawPreview.points.length >= 500) { finishDraw(); return; }
+      }
+    }
+    redrawAnnoCanvas();
+  }
+
+  function onAnnoPointerUp(e) {
+    if (!state.drawMode || !drawPreview) return;
+    e.preventDefault(); e.stopPropagation();
+    finishDraw();
+  }
+
+  function finishDraw() {
+    var dp = drawPreview;
+    var c = els.annoCanvas;
+    if (drawPointer) { try { c.releasePointerCapture(drawPointer.id); } catch (err) {} }
+    drawPointer = null;
+    drawPreview = null;
+    if (!dp) { exitDrawMode(); return; }
+    if (dp.type === "arrow") {
+      var dist = Math.hypot(dp.x2 - dp.x1, dp.y2 - dp.y1);
+      if (dist < 10) { toast("距离过短，已取消", "info"); exitDrawMode(); return; }
+      saveAnnotation({ type: "arrow", x1: dp.x1, y1: dp.y1, x2: dp.x2, y2: dp.y2 });
+    } else {
+      var pts = dp.points;
+      if (pts.length < 3) { toast("描图点太少，已取消", "info"); exitDrawMode(); return; }
+      var xs = pts.map(function (p) { return p[0]; });
+      var ys = pts.map(function (p) { return p[1]; });
+      var bb = Math.max(Math.max.apply(null, xs) - Math.min.apply(null, xs),
+                        Math.max.apply(null, ys) - Math.min.apply(null, ys));
+      if (bb < 10) { toast("描图范围太小，已取消", "info"); exitDrawMode(); return; }
+      saveAnnotation({ type: "freehand", points: pts });
+    }
+  }
+
+  function screenToImg(e) {
+    var rect = viewer.container.getBoundingClientRect();
+    var p = viewer.viewport.viewerElementToImageCoordinates(
+      new OpenSeadragon.Point(e.clientX - rect.left, e.clientY - rect.top));
+    return { x: Math.round(p.x), y: Math.round(p.y) };
+  }
+  function screenPt(e) {
+    var rect = viewer.container.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+
+  // 保存用户标注（arrow/freehand）
+  function saveAnnotation(geom) {
+    if (!state.slide) return;
+    var label = (els.roiLabel.value || "").trim();
+    if (!label) {
+      toast("请填写标记人或标签", "error");
+      try { els.roiLabel.focus(); } catch (e) {}
+      exitDrawMode();
+      return;
+    }
+    var body = { slide: state.slide.name, type: geom.type, label: label };
+    for (var k in geom) body[k] = geom[k];
+    fetch(API + "/api/roi", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+      .then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || "保存失败"); });
+        return r.json();
+      })
+      .then(function () {
+        toast("标注已保存", "success");
+        exitDrawMode();
+        loadRoiPanel();
+        loadCurrentRois();
+      })
+      .catch(function (e) { toast("保存失败: " + e.message, "error"); exitDrawMode(); });
+  }
+
+  // 加载当前切片的标注（本 token + 管理员）供画布层绘制
+  function loadCurrentRois() {
+    if (!state.slide) { currentRois = []; redrawAnnoCanvas(); return; }
+    fetch(API + "/api/rois")
+      .then(function (r) { return r.json(); })
+      .then(function (rois) {
+        currentRois = (rois || []).filter(function (r) { return r.slide === state.slide.name; });
+        redrawAnnoCanvas();
+      })
+      .catch(function () { currentRois = []; redrawAnnoCanvas(); });
+  }
+
   // ---------- 选区面板 ----------
   function loadRoiPanel() {
     fetch(API + "/api/rois")
@@ -610,22 +931,40 @@
       item.className = "roi-panel-item";
 
       var label = (r.label && String(r.label).trim()) || "未署名";
+      var typ = r.type || "rect";
+      var isAdmin = (r.source === "admin");
+      var icon = typ === "arrow" ? "↗" : (typ === "freehand" ? "〰" : "▭");
+
+      // 类型图标
+      var iconEl = document.createElement("div");
+      iconEl.className = "rpi-icon";
+      iconEl.textContent = icon;
+      item.appendChild(iconEl);
 
       var info = document.createElement("div");
       info.className = "ri-info";
       var title = document.createElement("div");
       title.className = "ri-title";
-      // label 粗体 + 尺寸
       var lblEl = document.createElement("span");
       lblEl.className = "ri-label";
       lblEl.textContent = label;
       title.appendChild(lblEl);
+      // 尺寸/坐标摘要
       var szEl = document.createElement("span");
-      szEl.textContent = " · " + r.size_mm + "mm";
+      szEl.className = "rpi-size";
+      if (typ === "rect") szEl.textContent = " · " + r.size_mm + "mm";
+      else if (typ === "arrow") szEl.textContent = " · (" + r.x1 + "," + r.y1 + ")";
+      else szEl.textContent = " · " + (r.points ? r.points.length : 0) + "点";
       title.appendChild(szEl);
+      if (isAdmin) {
+        var badge = document.createElement("span");
+        badge.className = "rpi-badge";
+        badge.textContent = "管理员";
+        title.appendChild(badge);
+      }
       var sub = document.createElement("div");
       sub.className = "ri-sub";
-      sub.textContent = "(" + r.x + "," + r.y + ") " + fmtTime(r.ts);
+      sub.textContent = fmtTime(r.ts);
       info.appendChild(title);
       info.appendChild(sub);
 
@@ -633,17 +972,21 @@
       info.style.cursor = "pointer";
       info.addEventListener("click", function () { jumpToRoi(r); });
 
-      var del = document.createElement("button");
-      del.className = "ri-del";
-      del.textContent = "×";
-      del.title = "删除";
-      del.addEventListener("click", function (ev) {
-        ev.stopPropagation();
-        deleteRoi(r.index);
-      });
-
       item.appendChild(info);
-      item.appendChild(del);
+
+      // 删除钮：仅本人的可删（admin 不可删）
+      if (!isAdmin) {
+        var del = document.createElement("button");
+        del.className = "ri-del";
+        del.textContent = "×";
+        del.title = "删除";
+        del.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          deleteRoi(r.index);
+        });
+        item.appendChild(del);
+      }
+
       els.panelList.appendChild(item);
     });
   }
@@ -661,11 +1004,12 @@
       .then(function () {
         toast("已删除选区", "success");
         loadRoiPanel();
+        loadCurrentRois();
       })
       .catch(function (e) { toast(e.message, "error"); });
   }
 
-  // 跳转到指定 ROI：切到对应切片，OSD open 后居中并重建选区框
+  // 跳转到指定 ROI：切到对应切片，OSD open 后定位
   function jumpToRoi(r) {
     var needSwitch = !(state.slide && state.slide.name === r.slide);
     if (needSwitch) {
@@ -682,13 +1026,33 @@
   }
 
   function doJump(r) {
-    rebuildRoi(r.x, r.y, r.side_px, r.size_mm);
+    var typ = r.type || "rect";
+    var x, y, side;
+    if (typ === "arrow") {
+      x = Math.min(r.x1, r.x2); y = Math.min(r.y1, r.y2);
+      side = Math.max(Math.abs(r.x2 - r.x1), Math.abs(r.y2 - r.y1));
+    } else if (typ === "freehand") {
+      var xs = r.points.map(function (p) { return p[0]; });
+      var ys = r.points.map(function (p) { return p[1]; });
+      x = Math.min.apply(null, xs); y = Math.min.apply(null, ys);
+      side = Math.max(Math.max.apply(null, xs) - x, Math.max.apply(null, ys) - y);
+    } else {
+      x = r.x; y = r.y; side = r.side_px;
+    }
+    side = Math.max(side, 1);
+    var pad = side * 0.2;
+    // rect 用 rebuildRoi 重建选区框；arrow/freehand 仅 fitBounds（画布层已显示）
+    if (typ === "rect") {
+      rebuildRoi(r.x, r.y, r.side_px, r.size_mm);
+    }
     try {
-      var rect = viewer.viewport.imageToViewportRectangle(r.x, r.y, r.side_px, r.side_px);
+      var rect = viewer.viewport.imageToViewportRectangle(
+        x - pad, y - pad, side + pad * 2, side + pad * 2);
       viewer.viewport.fitBounds(rect);
     } catch (e) {}
-    // 隐藏面板
+    // 隐藏面板与遮罩
     els.panel.style.display = "none";
+    if (els.panelMask) els.panelMask.style.display = "none";
   }
 
   function fmtTime(ts) {
@@ -716,15 +1080,41 @@
       if (e.key === "Enter") setMpp();
     });
 
-    // 选区面板开关
+    // 标注绘制工具 + 显示切换
+    els.annoArrowBtn.addEventListener("click", function () { toggleDrawMode("arrow"); });
+    els.annoFreeBtn.addEventListener("click", function () { toggleDrawMode("freehand"); });
+    els.annoAllBtn.addEventListener("click", toggleAnnoAll);
+
+    // 标注画布层绘制事件
+    var c = els.annoCanvas;
+    c.addEventListener("pointerdown", onAnnoPointerDown);
+    c.addEventListener("pointermove", onAnnoPointerMove);
+    c.addEventListener("pointerup", onAnnoPointerUp);
+    c.addEventListener("pointercancel", onAnnoPointerUp);
+    window.addEventListener("resize", function () { resizeAnnoCanvas(); redrawAnnoCanvas(); });
+
+    // 选区面板开关（底部抽屉 + 遮罩）
     els.panelToggle.addEventListener("click", function () {
       var showing = els.panel.style.display !== "none";
-      els.panel.style.display = showing ? "none" : "flex";
-      if (!showing) loadRoiPanel();
+      if (showing) {
+        els.panel.style.display = "none";
+        if (els.panelMask) els.panelMask.style.display = "none";
+      } else {
+        els.panel.style.display = "flex";
+        if (els.panelMask) els.panelMask.style.display = "block";
+        loadRoiPanel();
+      }
     });
     els.panelClose.addEventListener("click", function () {
       els.panel.style.display = "none";
+      if (els.panelMask) els.panelMask.style.display = "none";
     });
+    if (els.panelMask) {
+      els.panelMask.addEventListener("click", function () {
+        els.panel.style.display = "none";
+        els.panelMask.style.display = "none";
+      });
+    }
   }
 
   // ---------- 启动 ----------
