@@ -1247,6 +1247,29 @@ button {
 .slide-row.active .slide-edit { color: #fff; }
 .slide-row.active .slide-edit:hover { background: rgba(255, 255, 255, 0.2); }
 
+/* 单独分享按钮（hover 浮现，与删除/编辑同风格） */
+.slide-share {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+.slide-row:hover .slide-share { opacity: 1; }
+.slide-share:hover { background: var(--accent-fill); color: var(--accent); }
+.slide-row.active .slide-share { color: #fff; }
+.slide-row.active .slide-share:hover { background: rgba(255, 255, 255, 0.2); }
+
 /* 行内编辑态：展开后替换原行内容 */
 .slide-edit-form {
   flex: 1;

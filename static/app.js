@@ -27,7 +27,7 @@
   var pickerCtx = { targetPid: null, selected: {} };
 
   // 未归类勾选
-  var unfiledChecked = {};
+  var slideChecked = {};   // 切片勾选状态（项目内 + 未归类统一，供分享/新建项目用）
 
   // 分享创建用的临时切片集（分享选中 / 项目分享）
   var sharePendingSlides = null; // 若非 null，则用此切片集创建分享
@@ -858,25 +858,19 @@
     row.dataset.name = sname;
     if (state.slide && state.slide.name === sname) row.classList.add("active");
 
-    if (unfiled) {
-      var cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.className = "slide-check";
-      cb.title = "勾选";
-      if (unfiledChecked[sname]) cb.checked = true;
-      cb.addEventListener("click", function (ev) { ev.stopPropagation(); });
-      cb.addEventListener("change", function () { unfiledChecked[sname] = cb.checked; });
-      row.appendChild(cb);
-    } else {
-      var icon = document.createElement("span");
-      icon.className = "sr-icon";
-      icon.textContent = "📄";
-      row.appendChild(icon);
-    }
+    // 所有切片行（项目内 + 未归类）都带复选框，可勾选用于分享/新建项目
+    var cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "slide-check";
+    cb.title = "勾选（用于分享/新建项目）";
+    if (slideChecked[sname]) cb.checked = true;
+    cb.addEventListener("click", function (ev) { ev.stopPropagation(); });
+    cb.addEventListener("change", function () { slideChecked[sname] = cb.checked; });
+    row.appendChild(cb);
 
     var mid = document.createElement("div");
     mid.className = "slide-mid";
-    var failed = (unfiled && sinfo && sinfo.error) || (!sinfo);
+    var failed = (sinfo && sinfo.error) || (!sinfo);
     var alias = (sinfo && sinfo.alias) || "";
 
     // 第一行：别名优先（无别名则截断文件名）+ 标注 pill，第二行：meta
@@ -935,6 +929,17 @@
       enterSlideMetaEdit(row, sname, sinfo);
     });
     row.appendChild(editBtn);
+
+    // 单独分享按钮（hover 浮现）：直接分享这一张，无需勾选
+    var shareBtn = document.createElement("button");
+    shareBtn.className = "slide-share";
+    shareBtn.textContent = "↗";
+    shareBtn.title = "单独分享此切片";
+    shareBtn.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      doCreateShare([sname]);
+    });
+    row.appendChild(shareBtn);
 
     // 删除按钮（hover 浮现）
     var delBtn = document.createElement("button");
@@ -1059,7 +1064,7 @@
         toast("项目已创建", "success");
         toggleNewProjectForm(false);
         pendingNewProjectSlides = null;
-        unfiledChecked = {};
+        slideChecked = {};
         reloadProjectsAndUnfiled();
       })
       .catch(function (e) { toast("创建失败: " + e.message, "error"); });
@@ -1219,7 +1224,7 @@
         copyText(data.url);
         toast("分享链接已生成并复制", "success");
         sharePendingSlides = null;
-        unfiledChecked = {};
+        slideChecked = {};
         renderUnfiled();
         reloadShares();
       })
@@ -1249,15 +1254,15 @@
     if (sharePendingSlides) {
       slides = sharePendingSlides;
     } else {
-      slides = Object.keys(unfiledChecked).filter(function (k) { return unfiledChecked[k]; });
+      slides = Object.keys(slideChecked).filter(function (k) { return slideChecked[k]; });
     }
     doCreateShare(slides);
   }
 
   // 未归类"分享选中"
   function onUnfiledShare() {
-    var slides = Object.keys(unfiledChecked).filter(function (k) { return unfiledChecked[k]; });
-    if (slides.length === 0) { toast("请先勾选未归类切片", "error"); return; }
+    var slides = Object.keys(slideChecked).filter(function (k) { return slideChecked[k]; });
+    if (slides.length === 0) { toast("请先勾选切片", "error"); return; }
     doCreateShare(slides);
   }
 
@@ -1990,8 +1995,8 @@
       if (sec) sec.classList.toggle("collapsed");
     });
     els.unfiledNewProject.addEventListener("click", function () {
-      var slides = Object.keys(unfiledChecked).filter(function (k) { return unfiledChecked[k]; });
-      if (slides.length === 0) { toast("请先勾选未归类切片", "error"); return; }
+      var slides = Object.keys(slideChecked).filter(function (k) { return slideChecked[k]; });
+      if (slides.length === 0) { toast("请先勾选切片", "error"); return; }
       // 预填并打开表单：这里直接以选中切片创建项目
       toggleNewProjectForm(true);
       // 记录待加入切片，确认时带上
