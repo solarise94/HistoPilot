@@ -44,6 +44,7 @@
     roi6: $("roi-6"),
     roi65: $("roi-6-5"),
     saveBtn: $("save-btn"),
+    saveAnnoBtn: $("save-anno-btn"),
     annoBtn: $("anno-btn"),
     annoAllBtn: $("anno-all-btn"),
     annoArrowBtn: $("anno-arrow-btn"),
@@ -484,6 +485,7 @@
     updateRoiOverlay();
     updateRoiButtons();
     els.saveBtn.disabled = false;
+    els.saveAnnoBtn.disabled = false;
   }
 
   function exitRoi() {
@@ -495,6 +497,7 @@
     roiBox = null;
     updateRoiButtons();
     els.saveBtn.disabled = true;
+    els.saveAnnoBtn.disabled = true;
   }
 
   function updateRoiButtons() {
@@ -629,6 +632,47 @@
       .finally(function () {
         els.saveBtn.textContent = originalText;
         els.saveBtn.disabled = state.roiMode == null;
+      });
+  }
+
+  // ---------- 保存矩形选区为标注（管理员 rect 标注） ----------
+  function saveAnno() {
+    if (!state.slide || state.roiMode == null) return;
+    var r = state.roi;
+    var label = (els.annoLabelInput.value || "").trim() || "管理员";
+    var body = {
+      slide: state.slide.name,
+      type: "rect",
+      label: label,
+      x: Math.round(r.x),
+      y: Math.round(r.y),
+      side_px: Math.round(r.side),
+      size_mm: state.roiMode,
+      shared: false,
+    };
+    els.saveAnnoBtn.disabled = true;
+    fetch("/api/annotation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (j) {
+          throw new Error(j.error || ("保存失败 " + res.status));
+        });
+        return res.json();
+      })
+      .then(function () {
+        toast("标注已保存（可在标注面板设为公开）", "success");
+        refreshCurrentAnnotations();
+        loadAnnotationsIndex().then(function () {
+          renderProjects(allProjects);
+          renderUnfiled();
+        });
+      })
+      .catch(function (e) { toast("保存失败: " + e.message, "error"); })
+      .finally(function () {
+        els.saveAnnoBtn.disabled = state.roiMode == null;
       });
   }
 
@@ -1673,6 +1717,7 @@
       (grp.items || []).forEach(function (it) {
         var row = document.createElement("div");
         row.className = "anno-item";
+        if (!it.shared) row.classList.add("anno-private");
         var left = document.createElement("div");
         left.className = "ai-info";
         var typIcon = (it.type === "arrow") ? "↗" : (it.type === "freehand" ? "〰" : "▭");
@@ -1686,8 +1731,24 @@
           '<div class="ai-sub">' + fmtTime(it.ts) +
           (it.token ? " · 来源 " + String(it.token).slice(0, 6) : "") + "</div>";
         row.appendChild(left);
+
+        // 「公开」切换钮：管理员可策展任意来源标注
+        var sharedBtn = document.createElement("button");
+        sharedBtn.className = "ai-share" + (it.shared ? " on" : "");
+        sharedBtn.textContent = it.shared ? "🌐" : "👁";
+        sharedBtn.title = it.shared ? "已公开展示给所有分享用户（点击取消公开）"
+                                    : "未公开（点击公开展示给所有分享用户）";
+        sharedBtn.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          toggleAnnoShared(it, sharedBtn, row);
+        });
+        row.appendChild(sharedBtn);
+
         row.style.cursor = "pointer";
-        row.addEventListener("click", function () { jumpToAnno(it); });
+        row.addEventListener("click", function (ev) {
+          if (ev.target === sharedBtn) return;
+          jumpToAnno(it);
+        });
         els.annoPanelList.appendChild(row);
       });
     });
@@ -1699,6 +1760,72 @@
     var p = function (n) { return n < 10 ? "0" + n : n; };
     return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
       " " + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+
+  // 解析某标注条目在其 token 下的 index（annotations 接口不直接给 index，
+  // 通过 /api/share/rois 取该 token 列表，按 slide+ts+几何匹配）
+  function resolveAnnoIndex(it) {
+    var token = it.token;
+    if (!token) return Promise.reject(new Error("缺少 token"));
+    return fetch("/api/share/rois")
+      .then(function (r) { return r.json(); })
+      .then(function (rois) {
+        var cands = (rois || []).filter(function (r) { return r.token === token; });
+        // 优先按 slide+ts 精确匹配；ts 不在则退回 slide+几何
+        var match = null;
+        for (var i = 0; i < cands.length; i++) {
+          var r = cands[i];
+          if (r.slide === it.slide && Number(r.ts) === Number(it.ts)) { match = r; break; }
+        }
+        if (!match) {
+          for (var j = 0; j < cands.length; j++) {
+            var rr = cands[j];
+            if (rr.slide !== it.slide || (rr.type || "rect") !== (it.type || "rect")) continue;
+            if ((rr.type || "rect") === "rect" &&
+                Number(rr.x) === Number(it.x) && Number(rr.y) === Number(it.y) &&
+                Number(rr.side_px) === Number(it.side_px)) { match = rr; break; }
+            if (rr.type === "arrow" &&
+                Number(rr.x1) === Number(it.x1) && Number(rr.y1) === Number(it.y1) &&
+                Number(rr.x2) === Number(it.x2) && Number(rr.y2) === Number(it.y2)) { match = rr; break; }
+            if (rr.type === "freehand" && rr.points && it.points &&
+                rr.points.length === it.points.length) { match = rr; break; }
+          }
+        }
+        if (!match) throw new Error("未找到对应标注");
+        return match.index;
+      });
+  }
+
+  // 切换某标注的「公开」状态（策展）
+  function toggleAnnoShared(it, btnEl, rowEl) {
+    var token = it.token;
+    if (!token) { toast("缺少来源 token", "error"); return; }
+    var target = !it.shared;
+    btnEl.disabled = true;
+    resolveAnnoIndex(it)
+      .then(function (index) {
+        return fetch("/api/annotation/" + encodeURIComponent(token) + "/" + index, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ shared: target }),
+        }).then(function (r) {
+          if (!r.ok) return r.json().then(function (j) {
+            throw new Error(j.error || ("更新失败 " + r.status));
+          });
+          return r.json();
+        });
+      })
+      .then(function () {
+        it.shared = target;
+        btnEl.classList.toggle("on", target);
+        btnEl.textContent = target ? "🌐" : "👁";
+        btnEl.title = target ? "已公开展示给所有分享用户（点击取消公开）"
+                             : "未公开（点击公开展示给所有分享用户）";
+        if (rowEl) rowEl.classList.toggle("anno-private", !target);
+        toast(target ? "已设为公开" : "已取消公开", "success");
+      })
+      .catch(function (e) { toast("更新失败: " + e.message, "error"); })
+      .finally(function () { btnEl.disabled = false; });
   }
 
   // 点击标注条目：fitBounds（按类型算包围盒）+ 临时重建黄色 ROI 框
@@ -1821,6 +1948,7 @@
     els.roi6.addEventListener("click", function () { toggleRoi(6); });
     els.roi65.addEventListener("click", function () { toggleRoi(6.5); });
     els.saveBtn.addEventListener("click", saveCrop);
+    els.saveAnnoBtn.addEventListener("click", saveAnno);
     els.mppSetBtn.addEventListener("click", setMpp);
     els.mppInput.addEventListener("keydown", function (e) { if (e.key === "Enter") setMpp(); });
 

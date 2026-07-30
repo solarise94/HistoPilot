@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SVS 病理图像查看器</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260731b" />
+  <link rel="stylesheet" href="/static/style.css?v=20260731c" />
   <!-- OpenSeadragon 5.0.1（已本地化） -->
   <script src="/static/openseadragon.min.js"></script>
 </head>
@@ -32,6 +32,9 @@
         <button id="roi-6" class="seg roi-btn" data-size="6">ROI 6mm</button>
         <button id="roi-6-5" class="seg roi-btn" data-size="6.5">ROI 6.5mm</button>
       </div>
+
+      <!-- 保存当前矩形选区为标注（仅 ROI 模式可用，与「保存图片」区分） -->
+      <button id="save-anno-btn" class="tool-btn anno-save" disabled title="把当前矩形选区保存为标注">保存标记</button>
 
       <!-- 标注绘制工具：箭头 / 描图（与 ROI 模式互斥） -->
       <div class="btn-group anno-tools">
@@ -195,6 +198,6 @@
   <!-- toast 容器 -->
   <div id="toast-container"></div>
 
-  <script src="/static/app.js?v=20260731b"></script>
+  <script src="/static/app.js?v=20260731c"></script>
 </body>
 </html>

@@ -536,6 +536,10 @@ button {
   border-radius: var(--r-pill);
   flex-shrink: 0;
 }
+/* 「公开」徽标：区别于管理员（accent），用绿色表示被管理员公开的他人标注 */
+.rpi-badge.shared {
+  background: #34A853;
+}
 .roi-panel-item .ri-sub {
   font-size: 11px;
   color: var(--text-2);

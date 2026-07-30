@@ -804,11 +804,11 @@ def api_slide_meta(name):
 # --------------------------------------------------------------------------- #
 @app.route("/api/annotation", methods=["POST"])
 def api_annotation_add():
-    """管理员新增标注。JSON: {slide, type?, label?, ...geometry}。
+    """管理员新增标注。JSON: {slide, type?, label?, shared?, ...geometry}。
 
     token 固定为 "admin"，label 默认 "管理员"。slide 必须存在。
     几何字段随 type 不同：rect(x,y,side_px,size_mm) / arrow(x1,y1,x2,y2) /
-    freehand(points)。
+    freehand(points)。shared 可选（默认 false），透传给 store 记录公开状态。
     """
     body = request.get_json(silent=True) or {}
     slide = body.get("slide")
@@ -829,6 +829,9 @@ def api_annotation_add():
     if not isinstance(label, str):
         return jsonify(error="label 需为字符串"), 400
 
+    # shared 可选，透传给 store（默认 False）
+    shared = bool(body.get("shared", False))
+
     # 收集几何字段（透传给 add_roi 校验）
     geom = {}
     for k in ("x", "y", "side_px", "size_mm", "x1", "y1", "x2", "y2", "points"):
@@ -836,11 +839,11 @@ def api_annotation_add():
             geom[k] = body[k]
     try:
         roi = share_store.add_roi(
-            share_store.ADMIN_TOKEN, safe, label, type=typ, **geom
+            share_store.ADMIN_TOKEN, safe, label, type=typ, shared=shared, **geom
         )
     except ValueError as e:
         return jsonify(error=str(e)), 400
-    return jsonify(ok=True, index=roi["index"])
+    return jsonify(ok=True, index=roi["index"], shared=roi.get("shared", shared))
 
 
 @app.route("/api/annotation/admin/<int:index>", methods=["DELETE"])
@@ -861,6 +864,25 @@ def api_annotation_delete(token, index):
     if not ok:
         return jsonify(error="标注不存在"), 404
     return jsonify(ok=True)
+
+
+@app.route("/api/annotation/<token>/<int:index>", methods=["PATCH"])
+def api_annotation_set_shared(token, index):
+    """管理员策展：切换任意 token 标注的「公开」状态。
+
+    JSON body: {"shared": bool}。允许任意 token（管理员可策展全部标注）。
+    token/index 无效返回 404；成功返回 {"ok": true, "shared": bool}。
+    """
+    if not isinstance(token, str) or not token:
+        return jsonify(error="缺少 token"), 400
+    body = request.get_json(silent=True) or {}
+    if "shared" not in body:
+        return jsonify(error="缺少 shared"), 400
+    shared = bool(body.get("shared"))
+    ok = share_store.set_roi_shared(token, index, shared)
+    if not ok:
+        return jsonify(error="标注不存在"), 404
+    return jsonify(ok=True, shared=shared)
 
 
 if __name__ == "__main__":

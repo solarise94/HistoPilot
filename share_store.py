@@ -39,6 +39,22 @@ DEFAULT_ROI_SIZES = [6.0, 6.5]
 ADMIN_TOKEN = "admin"
 
 
+def _roi_shared_compat(roi):
+    """读取 roi 的 shared 字段并做旧数据兼容。
+
+    缺失 "shared" 字段时：
+      - token == "admin" 视为 True（管理员标注此前对分享用户全可见，保持不突变）
+      - 其他用户 token 视为 False（此前对其他用户本就不可见）
+    存在但非布尔时按真值判断；最终统一返回 bool。
+    """
+    if not isinstance(roi, dict):
+        return False
+    if "shared" in roi:
+        return bool(roi.get("shared"))
+    # 旧数据兼容
+    return roi.get("token") == ADMIN_TOKEN
+
+
 def _normalize_roi_sizes(roi_sizes):
     """校验并归一化 roi_sizes：统一转 float，去重保序，且必须是
     ALLOWED_ROI_SIZES 的子集。返回 list[float]；非法抛 ValueError。
@@ -347,7 +363,7 @@ def _validate_geom(typ, geom):
     raise ValueError("未知标注类型")
 
 
-def add_roi(token, slide, label, type="rect", size_mm=0.0, **geom):
+def add_roi(token, slide, label, type="rect", size_mm=0.0, shared=False, **geom):
     """为 token 的 share 添加一条标注；统一入口，支持 rect/arrow/freehand。
 
     管理员标注使用 token="admin"（此时 share 校验放宽：不要求 token 命中 shares，
@@ -355,8 +371,9 @@ def add_roi(token, slide, label, type="rect", size_mm=0.0, **geom):
 
     label（标记人/标签）为必填，去空白后非空，否则抛 ValueError。
     type 必须是 ROI_TYPES 之一（缺省 rect，向后兼容）。
+    shared 为布尔，记录该标注是否对全部分享用户公开展示（缺省 False）。
 
-    返回新增的 roi dict（含该 token 下的 index，从 0 起按时间顺序）。
+    返回新增的 roi dict（含该 token 下的 index，从 0 起按时间顺序，以及 shared）。
     若校验失败抛出 ValueError。
     """
     # type 合法性
@@ -392,6 +409,7 @@ def add_roi(token, slide, label, type="rect", size_mm=0.0, **geom):
             "slide": slide,
             "label": label,
             "ts": time.time(),
+            "shared": bool(shared),
         }
         roi.update(norm)
         data["rois"].append(roi)
@@ -400,13 +418,17 @@ def add_roi(token, slide, label, type="rect", size_mm=0.0, **geom):
         same_token = [r for r in data["rois"] if r["token"] == token]
         roi_out = dict(roi)
         roi_out["index"] = len(same_token) - 1
+        roi_out["shared"] = bool(shared)
         return roi_out
 
     return _with_lock("r+", _do)
 
 
 def list_rois(token=None):
-    """返回 ROI 列表；可按 token 过滤。每项含 index（该 token 下的序号）。"""
+    """返回 ROI 列表；可按 token 过滤。
+
+    每项含 index（该 token 下的序号）与 shared（按兼容规则归一为 bool）。
+    """
     def _do(f):
         data = _load_locked(f)
         rois = data["rois"]
@@ -421,6 +443,7 @@ def list_rois(token=None):
             for r in rois:
                 rr = dict(r)
                 rr["index"] = idx_map.get(id(r), 0)
+                rr["shared"] = _roi_shared_compat(r)
                 out.append(rr)
             out.sort(key=lambda x: x.get("ts", 0), reverse=True)
             return out
@@ -432,6 +455,7 @@ def list_rois(token=None):
             rr = dict(r)
             rr["index"] = counters[r["token"]]
             counters[r["token"]] += 1
+            rr["shared"] = _roi_shared_compat(r)
             out.append(rr)
         out.sort(key=lambda x: x.get("ts", 0), reverse=True)
         return out
@@ -454,6 +478,26 @@ def delete_roi(token, index):
     return _with_lock("r+", _do)
 
 
+def set_roi_shared(token, index, shared):
+    """设置该 token 下第 index 条 ROI 的 shared 字段。
+
+    返回是否设置成功（token/index 无效时返回 False，不抛异常）。
+    shared 会被归一为 bool 并持久化。
+    """
+    shared_b = bool(shared)
+
+    def _do(f):
+        data = _load_locked(f)
+        same = [i for i, r in enumerate(data["rois"]) if r["token"] == token]
+        if index < 0 or index >= len(same):
+            return False
+        data["rois"][same[index]]["shared"] = shared_b
+        _save_locked(f, data)
+        return True
+
+    return _with_lock("r+", _do)
+
+
 def roi_count_by_token():
     """返回 {token: count} 计数表。"""
     def _do(f):
@@ -462,6 +506,41 @@ def roi_count_by_token():
         for r in data["rois"]:
             counts[r["token"]] = counts.get(r["token"], 0) + 1
         return counts
+
+    return _with_lock("r+", _do)
+
+
+def list_shared_rois_for_slides(slides):
+    """返回 shared 为真（按兼容规则判定）且 slide ∈ slides 的标注列表。
+
+    供分享端展示「公开标注」使用：包含管理员公开标注与其他用户被管理员公开的标注。
+    每项带 index/token/label/type/几何/ts/shared=True，按 token 归组计算 index
+    （与 list_rois 的 index 语义一致，便于按 token+index 定位）。
+    不传 slides 或空列表时返回空列表。
+    """
+    if not slides:
+        return []
+    slide_set = set(slides)
+
+    def _do(f):
+        data = _load_locked(f)
+        from collections import defaultdict
+        counters = defaultdict(int)  # token -> 下一个 index
+        out = []
+        for r in data["rois"]:
+            idx = counters[r["token"]]
+            counters[r["token"]] += 1
+            if r.get("slide") not in slide_set:
+                continue
+            if not _roi_shared_compat(r):
+                continue
+            rr = dict(r)
+            rr["index"] = idx
+            rr["shared"] = True
+            rr.setdefault("type", "rect")
+            out.append(rr)
+        out.sort(key=lambda x: x.get("ts", 0), reverse=True)
+        return out
 
     return _with_lock("r+", _do)
 
@@ -723,6 +802,7 @@ def annotations_by_slide():
                 "size_mm": r.get("size_mm"),
                 "side_px": r.get("side_px"),
                 "ts": r.get("ts"),
+                "shared": _roi_shared_compat(r),
             }
             # 带上 arrow / freehand 专属几何字段（存在则透传）
             for k in ("x1", "y1", "x2", "y2", "points"):

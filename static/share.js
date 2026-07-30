@@ -1009,6 +1009,8 @@
       var label = (r.label && String(r.label).trim()) || "未署名";
       var typ = r.type || "rect";
       var isAdmin = (r.source === "admin");
+      var isShared = (r.source === "shared");
+      var isMe = (r.source === "me");
       var icon = typ === "arrow" ? "↗" : (typ === "freehand" ? "〰" : "▭");
 
       // 类型图标
@@ -1037,6 +1039,11 @@
         badge.className = "rpi-badge";
         badge.textContent = "管理员";
         title.appendChild(badge);
+      } else if (isShared) {
+        var sBadge = document.createElement("span");
+        sBadge.className = "rpi-badge shared";
+        sBadge.textContent = "公开";
+        title.appendChild(sBadge);
       }
       var sub = document.createElement("div");
       sub.className = "ri-sub";
@@ -1050,8 +1057,8 @@
 
       item.appendChild(info);
 
-      // 删除钮：仅本人的可删（admin 不可删）
-      if (!isAdmin) {
+      // 删除钮：仅本人的可删（admin / shared 不可删）
+      if (isMe) {
         var del = document.createElement("button");
         del.className = "ri-del";
         del.textContent = "×";

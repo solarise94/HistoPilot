@@ -1083,6 +1083,43 @@ button {
 }
 .anno-item .ai-sub { font-size: 10px; color: var(--text-2); margin-top: 2px; word-break: break-all; }
 
+/* 未公开标注：降透明度提示（公开后恢复正常） */
+.anno-item.anno-private { opacity: 0.55; }
+/* 「公开」切换钮：未公开灰色，公开(accent)高亮 */
+.anno-item .ai-share {
+  flex: 0 0 auto;
+  width: 26px; height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  border: none;
+  border-radius: var(--r-row);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  opacity: 0.7;
+  transition: background 0.12s ease, opacity 0.12s ease, color 0.12s ease;
+}
+.anno-item .ai-share:hover:not(:disabled) { background: var(--hover); opacity: 1; }
+.anno-item .ai-share.on {
+  color: var(--accent);
+  background: var(--accent-fill);
+  opacity: 1;
+}
+.anno-item .ai-share:disabled { cursor: default; opacity: 0.4; }
+
+/* 「保存标记」按钮：与「保存图片」(primary) 区分，用 secondary 风格 */
+.tool-btn.anno-save {
+  background: #fff;
+  color: var(--text);
+  border: 0.5px solid var(--separator-strong);
+  box-shadow: var(--shadow-sm);
+}
+.tool-btn.anno-save:hover:not(:disabled) { background: var(--hover); }
+.tool-btn.anno-save:active:not(:disabled) { background: var(--separator-strong); }
+
 /* 全部标记叠加框 */
 .anno-overlay-box {
   position: absolute;

@@ -489,24 +489,35 @@ def share_roi_add(token):
 
 @app.route("/s/<token>/api/rois")
 def share_roi_list(token):
-    """返回该 token 的标注 + 管理员(token=admin)标注（仅本分享切片内的）。
+    """返回本 token 可见的全部标注（仅本分享切片内）。
 
-    每项附加 source 字段："me"（本人）或 "admin"。
+    组装三类来源：
+      - source="me"：本 token 自己的全部标注（不受 shared 影响，始终可见，可删）
+      - source="admin"：管理员(admin)被公开的标注
+      - source="shared"：其他用户被管理员公开的标注（非本 token、非 admin）
+    后两类来自 list_shared_rois_for_slides(本分享切片)，且排除本 token 自身。
+    每项的 index 沿用 list_rois 的 token+index 语义（按 token 归组）。
     """
     share = _require_share(token)
-    share_slides = set(share.get("slides", []))
+    share_slides = share.get("slides", [])
+
+    # 1) 本 token 全部标注（含未公开，source=me）
     mine = share_store.list_rois(token)
-    admin_all = share_store.list_rois(share_store.ADMIN_TOKEN)
     out = []
     for r in mine:
         rr = dict(r)
         rr["source"] = "me"
         out.append(rr)
-    for r in admin_all:
-        if r.get("slide") in share_slides:
-            rr = dict(r)
-            rr["source"] = "admin"
-            out.append(rr)
+
+    # 2) 管理员策展公开的他人/admin 标注（排除本 token 自身）
+    shared_all = share_store.list_shared_rois_for_slides(share_slides)
+    for r in shared_all:
+        if r.get("token") == token:
+            continue  # 本人的公开标注已在 me 中，不重复
+        rr = dict(r)
+        rr["source"] = "admin" if r.get("token") == share_store.ADMIN_TOKEN else "shared"
+        out.append(rr)
+
     # 按时间倒序
     out.sort(key=lambda x: x.get("ts", 0), reverse=True)
     return jsonify(out)
