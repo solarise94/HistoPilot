@@ -185,3 +185,20 @@ python3 scripts/migrate_json_to_pg.py rollback --backup-dir <备份目录> --yes
 - 冒烟用户已禁用（disable → 登录 401）✓；**注意**：/api/admin/users 暂无 DELETE，只有 disable/enable/password
 - 本次重建曾暴露 Containerfile 漏 COPY user_store.py（gunicorn worker 起不来），已修（c79e688）并加静态守卫测试 test_containerfile_ships_app_modules
 
+
+### 切换演练记录（2026-08-14，demo 已切 postgres 为终态）
+
+1. `postgres:16` 容器 `svs-pg`：host 网络、`127.0.0.1:5433`、数据卷 `~/svs-pg-data`、
+   `--restart unless-stopped`；账号 `svs` / 库 `svs_demo`，密码与 DATABASE_URL 在
+   `~/svs-viewer-demo-data/pg.env`（0600，含 `STORAGE_BACKEND=postgres`）。
+2. 迁移：dry-run（users 2，其余 0——demo 数据极简）→ apply（备份 +
+   mapping.json 在 `/data/share/migration-backup-*/`）→ verify 0 差异 ✓
+3. 切后端：demo 容器加 `--env-file pg.env` 重启 → 启动期 ensure_schema 过、
+   gunicorn 正常 ✓
+4. PG 后端公网冒烟：登录 302（PG verify_user）✓；slides 列表 ✓；建分享 +
+   管理员标注落 PG（psql 直查 shares/rois 表确认）✓；真实 M3 AI run finished ✓
+5. 回滚演练：摘 STORAGE_BACKEND 重启 → json 后端登录正常 ✓；回切 postgres →
+   PG 时代建的分享仍在 ✓（注意：切换后回滚会丢 PG 时代的写——json 与 pg 自此
+   发散，故 verify 通过应立即切换，勿长时双轨）
+6. 冒烟数据已清理（分享吊销、标注删除）。demo 现以 **postgres 为唯一存储**运行；
+   json 文件保留为迁移备份。
