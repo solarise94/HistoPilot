@@ -301,3 +301,19 @@ python3 scripts/migrate_json_to_pg.py rollback --backup-dir <备份目录> --yes
    发散，故 verify 通过应立即切换，勿长时双轨）
 6. 冒烟数据已清理（分享吊销、标注删除）。demo 现以 **postgres 为唯一存储**运行；
    json 文件保留为迁移备份。
+
+### 双容器分离演练记录（2026-08-14 晚，Stage 4-3 验收）
+
+demo 当前拓扑（终态）：
+
+- `svs-viewer-demo`（ROLE=platform）：卷 uploads + share；env admin.env + pg.env；
+  无 sidecar 进程、无 sessions 卷
+- `svs-sidecar`（ROLE=sidecar）：仅卷 sidecar-sessions；env plugin-sidecar.env
+  （PLUGIN_INSTALLATION_ID + PLUGIN_HISTOPILOT_SECRET，0600，从平台引导的
+  plugin-secret-histopilot.txt 提取）+ AI_FLASK_URL=http://127.0.0.1:18080
+- 两容器 host 网络经 loopback 互调；**平台与插件不共享卷/数据库** ✓
+- 验收：AI run 跨容器 finished ✓；停 svs-sidecar → 平台 /healthz 200
+  （sidecar:unreachable 不 fail）、slides/标注正常、AI 503 ✓；重启 sidecar →
+  reachable 自动恢复 ✓
+- 修复记录：/healthz 曾遭 _require_auth 302（8bf2c20 修复 + 回归测试）；
+  会话目录一次性迁移 entry 日志确认（ai_sessions → /data/sidecar-sessions）
