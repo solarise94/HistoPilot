@@ -109,3 +109,14 @@ ssh homePC "podman rm -f svs-viewer-demo && podman run -d --name svs-viewer-demo
   —— 即 review 复现的 "visual_context_budget_tokens 需为正整数" 400 不再出现；sidecar 回调 18080 正常（AI_FLASK_URL 推导生效）✓
 - sidecar /healthz：200 ✓
 - **2026-08-13 补充**：公网 HTTP 登录未 GO。后续带密码测试改走 `ssh -L 18080:127.0.0.1:18080 homePC`。
+
+## 验证记录（2026-08-14，Stage 3a 全部落地后重建）
+
+- 未登录：/ → 302；/api/slides、/api/ai/config → 401 ✓
+- owner（browser_admin）登录：/api/auth/info 返回 role=owner；/api/ai/config 返回 using=platform、platform_configured=true、window_tier=balanced ✓
+- 插件 bundle 7 个 js 全 200（/plugins/histopilot/ui/*）✓
+- 用户管理：owner 建 user（smoke@test.local）✓；user 登录后 config 视角 use_platform=true/using=platform；user 改调优字段 → 403 ✓；user 切片列表为空（无自有/公开/分享切片）✓；user 跑 owner 切片 AI → 403 ✓；user 拉他人切片 sessions → 403 ✓
+- 真实 AI run（synth-dense.tiff，MiniMax-M3，fresh）：slide_opened → snapshot → 中文描述 → session_ended finished ✓；owner 名下会话 owner=None（设计：owner 不注入 session_owner，user 过滤自然不可见）✓
+- 冒烟用户已禁用（disable → 登录 401）✓；**注意**：/api/admin/users 暂无 DELETE，只有 disable/enable/password
+- 本次重建曾暴露 Containerfile 漏 COPY user_store.py（gunicorn worker 起不来），已修（c79e688）并加静态守卫测试 test_containerfile_ships_app_modules
+
