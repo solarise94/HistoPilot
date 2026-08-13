@@ -317,3 +317,30 @@ demo 当前拓扑（终态）：
   reachable 自动恢复 ✓
 - 修复记录：/healthz 曾遭 _require_auth 302（8bf2c20 修复 + 回归测试）；
   会话目录一次性迁移 entry 日志确认（ai_sessions → /data/sidecar-sessions）
+
+### Stage 5（通用插件 SDK）部署记录（2026-08-14 清晨）
+
+- 镜像重建（含 5-1/5-2/5-3），双容器（svs-viewer-demo=platform / svs-sidecar）
+  均 rm -f + run 重建（podman restart 不吃新镜像，老坑）。
+- 平台容器新增 `-e SAMPLE_PLUGIN_ENABLED=1`：示例插件面板在 demo 默认开启，
+  便于验收「非 HistoPilot 最小插件」；关闭去掉该 env 重建即可。
+- 烟雾（公网 http://117.72.24.99:41083 全链路）：
+  - /healthz ok（backend=postgres，sidecar=reachable）；sidecar /healthz ok；
+  - 插件资产 200：histopilot/ui/main.js、sample-annotator/ui/main.js、
+    sdk/ui/bridge-client.js、sample-annotator/ui/index.html（.html 白名单）、
+    static/bridge-version.js、static/plugin-permissions.js；
+  - /api/plugin/v1/capabilities：无 token 401 unauthorized；容器内铸 HS256
+    plugin JWT（key=sha256("plugin-jwt:"+ai_secret.key) **raw digest**，不是
+    hexdigest——第一次铸错教训）→ 200，返回 contract/bridge 版本 + majors；
+  - 路径穿越 --path-as-is /plugins/../../app.py → 404；
+  - 登录（browser_admin）后 / 注入 SVS_PLUGIN_PERMISSIONS=
+    {"sample-annotator":[slide:metadata:read,viewer:navigate,annotation:write]}；
+  - 真实 AI run（synth-dense，fresh，公网 SSE）：148 事件 finished ✓。
+- 烟雾抓出并修复的两个 5-2 遗留 bug（24be69a）：
+  1. SDK 资产原放 plugins/sdk/bridge-client.js（无 ui/ 层）→ 通用路由
+     /plugins/<id>/ui/<file> 匹配不到 404；移入 plugins/sdk/ui/ 后 200；
+  2. 插件静态白名单仅 .js/.css → manifest ui.entry 的独立页 .html 403；
+     白名单加 .html（send_from_directory 原样返回，不经模板渲染）。
+  另有嵌入模式面板 DOM 自举修复（0779942）。
+- 来源策略 plugins/source-policy.json 随 COPY plugins/ 进镜像；改 manifest 后
+  必须重算 sha256 同步该文件（仓库有防漂移守卫测试）。
