@@ -158,6 +158,14 @@ python3 scripts/migrate_json_to_pg.py rollback --backup-dir <备份目录> --yes
   不 1:1 保留（`share_store_pg` 已声明的允许实现差；单调/按 slide 过滤语义一致）。
 - `ai_config.json`（平台 AI 配置）**不在迁移范围**：它是平台配置而非用户数据，
   仍留文件（owner 读写，见 app.py `_load_ai_config`）。
+- **sidecar 插件凭证轮转**（Stage 4-1b）：`POST /api/admin/plugins/<installation_id>/rotate-secret`
+  返回的新明文**仅一次**，且**不会自动同步**到 sidecar 可见的凭证文件/环境
+  （`plugin-secret-histopilot.txt` 或 `PLUGIN_HISTOPILOT_SECRET`/`PLUGIN_INSTALLATION_ID`）。
+  轮换后旧的 sidecar 缓存 token 会 401 unauthorized（token 换取失败）而无法换新——
+  需手工把新明文写回 sidecar 可见的文件（或更新 env）并重启 sidecar。当前 demo 里
+  Flask 与 sidecar 同容器同卷（`SHARE_DATA_DIR` 共享），故引导写入的文件天然对
+  sidecar 可见、无感；一旦二者拆开（不同容器/主机），轮换后必须同步更新 sidecar
+  侧的凭证来源。
 
 ## 已知待办
 
