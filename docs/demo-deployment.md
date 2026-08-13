@@ -94,6 +94,71 @@ ssh homePC "podman rm -f svs-viewer-demo && podman run -d --name svs-viewer-demo
 - 不要把密码写进 `podman run -e`：会进 shell history。
 - AI_FLASK_URL 不需要显式传，entrypoint 会按 PORT 推导。
 
+## PostgreSQL 模式（Stage 3b-3）
+
+Stage 3b 把存储层从 JSON 文件迁到 PostgreSQL（最终唯一存储，决策 #8）。过渡期
+`STORAGE_BACKEND` 三态：`json`（默认，零变化）/ `dual`（expand 形态：读 json 权威、
+写镜像 pg）/ `postgres`（pg 唯一存储）。demo 切换流程如下。
+
+### 架构
+
+- demo app 容器（本镜像）+ 同机一个 `postgres:16` 容器，host 网络下走
+  `127.0.0.1:5433`（避开本机 5432）。
+- app 容器经 `DATABASE_URL` 连库；`docker_entry.sh` 与 `app.py` 启动期都会
+  `ensure_schema`（幂等 + pg_advisory_lock 串行化多 worker），连不上/迁移失败即
+  fail-fast 退出，绝不带病启动。
+
+### DATABASE_URL 形态
+
+```
+DATABASE_URL=postgresql://svs:STRONG_PASSWORD@127.0.0.1:5433/svsviewer
+```
+
+（host 网络下 app 容器直连 127.0.0.1；bridge 网络下改成 postgres 容器名。）
+
+### 迁移命令序列（停写窗口执行）
+
+迁移工具 `scripts/migrate_json_to_pg.py` 只读 json（不经 dispatcher，与当前
+`STORAGE_BACKEND` 无关），所有写落 pg。**迁移期间必须停 json 写路径**（关停
+gunicorn / share_server）。
+
+```sh
+# 1) 起 postgres:16 容器（host 网络，5433）并建库/建用户（略）
+
+# 2) 只读核对：看将导入多少实体 + 潜在问题（不碰 pg）
+DATABASE_URL=postgresql://svs:...@127.0.0.1:5433/svsviewer \
+  python3 scripts/migrate_json_to_pg.py dry-run
+
+# 3) 执行导入（单事务、幂等；自动备份源 json + 写 mapping.json 到备份目录）
+DATABASE_URL=postgresql://svs:...@127.0.0.1:5433/svsviewer \
+  python3 scripts/migrate_json_to_pg.py apply
+
+# 4) 双读核对 json vs pg（0 差异为 OK；有差异 exit 2）
+DATABASE_URL=postgresql://svs:...@127.0.0.1:5433/svsviewer \
+  python3 scripts/migrate_json_to_pg.py verify
+
+# 5) 切 STORAGE_BACKEND=postgres 重启 app（json 写路径此后停用）
+STORAGE_BACKEND=postgres DATABASE_URL=postgresql://svs:... ...
+```
+
+### 回滚路径
+
+```sh
+# 从 apply 生成的备份目录把 json 拷回 SHARE_DATA_DIR
+python3 scripts/migrate_json_to_pg.py rollback --backup-dir <备份目录> --yes
+# 然后 STORAGE_BACKEND=json（或取消该 env）并重启服务。
+# PG 中的导入数据仍保留；如需清空可手动 TRUNCATE 业务表。
+```
+
+### 已知限制
+
+- json 写路径 contract（删除 json 写、pg 成为唯一存储）留后续 Stage 3b contract
+  阶段；当前 `dual` 仍保留 json 写路径，仅 expand 形态读 json。
+- `change_seq`：json 是 per-slide 计数器，pg 是 `change_log` 全局 bigserial，数值
+  不 1:1 保留（`share_store_pg` 已声明的允许实现差；单调/按 slide 过滤语义一致）。
+- `ai_config.json`（平台 AI 配置）**不在迁移范围**：它是平台配置而非用户数据，
+  仍留文件（owner 读写，见 app.py `_load_ai_config`）。
+
 ## 已知待办
 
 1. **frpc-svs-demo 未纳入 systemd**：homePC 重启后 frp 隧道不自动恢复（其余 frpc 实例同为 nohup，习惯一致；可后续统一改 systemd user unit）。
