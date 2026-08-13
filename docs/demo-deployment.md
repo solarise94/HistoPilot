@@ -94,6 +94,96 @@ ssh homePC "podman rm -f svs-viewer-demo && podman run -d --name svs-viewer-demo
 - 不要把密码写进 `podman run -e`：会进 shell history。
 - AI_FLASK_URL 不需要显式传，entrypoint 会按 PORT 推导。
 
+## 分离部署（Stage 4-3 可选形态）
+
+> 同容器（`ROLE=all`，上文默认命令）仍是**默认且受支持**的部署形态。本节是
+> **可选**的拆分形态：把平台（Flask/gunicorn）与 AI sidecar 拆成两个容器。
+> 红线：同容器模式必须继续工作——分离只是形态选择，不是强制。
+
+### 会话目录分离（同容器也生效）
+
+Stage 4-3 起 sidecar 会话不再与平台 `SHARE_DATA_DIR` 混放，而是用独立目录：
+
+- 目录解析优先级：`AI_SESSIONS_DIR`（env）> 缺省 `~/.svs-sidecar/sessions`。
+- 同容器（`ROLE=all`）`docker_entry.sh` 显式 `export AI_SESSIONS_DIR=/data/sidecar-sessions`，
+  Containerfile 已声明并 `mkdir` 该目录；容器加一个可选卷挂载点即可持久化：
+  `-v ~/svs-viewer-demo-data/sidecar-sessions:/data/sidecar-sessions`。
+- **一次性迁移**：`docker_entry.sh` 启动时若新目录为空且旧目录
+  `SHARE_DATA_DIR/ai_sessions` 存在，则把旧内容 `mv` 进新目录（仅 once）。
+
+```sh
+# 同容器 + 会话独立卷（在既有重建命令基础上加一行卷挂载）：
+podman run -d --name svs-viewer-demo \
+  --network host \
+  -v ~/svs-viewer-demo-data/uploads:/data/uploads \
+  -v ~/svs-viewer-demo-data/share:/data/share \
+  -v ~/svs-viewer-demo-data/sidecar-sessions:/data/sidecar-sessions \
+  ...
+```
+
+### 两容器命令
+
+**平台容器**（`ROLE=platform`，只 gunicorn）：
+
+```sh
+podman run -d --name svs-platform \
+  --network host \
+  -v ~/svs-viewer-demo-data/uploads:/data/uploads \
+  -v ~/svs-viewer-demo-data/share:/data/share \
+  --restart unless-stopped \
+  -e PORT=18080 -e ROLE=platform \
+  --env-file ~/svs-viewer-demo-data/admin.env \
+  svs-viewer-demo:latest
+```
+
+**sidecar 容器**（`ROLE=sidecar`，只 sidecar）。需要：
+- `AI_FLASK_URL` 指向平台容器的可达地址（host 网络下即 `http://127.0.0.1:18080`）；
+- `PLUGIN_INSTALLATION_ID` / `PLUGIN_HISTOPILOT_SECRET`（或挂载平台凭证文件）——见下节；
+- `AI_SESSIONS_DIR` 指向 sidecar 专属卷。
+
+```sh
+podman run -d --name svs-sidecar \
+  --network host \
+  -v ~/svs-viewer-demo-data/sidecar-sessions:/data/sidecar-sessions \
+  --restart unless-stopped \
+  -e ROLE=sidecar \
+  -e AI_FLASK_URL=http://127.0.0.1:18080 \
+  -e AI_SESSIONS_DIR=/data/sidecar-sessions \
+  -e PLUGIN_INSTALLATION_ID=pin_xxxx \
+  -e PLUGIN_HISTOPILOT_SECRET=<secret-from-platform> \
+  svs-viewer-demo:latest
+```
+
+### 凭证从哪来
+
+平台容器引导会写 `SHARE_DATA_DIR/plugin-secret-histopilot.txt`（JSON
+`{installation_id, secret}`，0600）。sidecar 容器与平台不同卷，**读不到该文件**，
+必须把凭证配进 sidecar 容器 env：
+
+```sh
+# 在平台容器上读取引导凭证：
+podman exec svs-platform cat /data/share/plugin-secret-histopilot.txt
+# 把 JSON 里的 installation_id / secret 填到 sidecar 容器的
+# PLUGIN_INSTALLATION_ID / PLUGIN_HISTOPILOT_SECRET env 后启动。
+```
+
+平台侧「插件管理」UI 里点「轮换凭证」后，新明文**只展示一次**，同样需要手工
+回填到 sidecar 容器 env 并重启 sidecar（凭证不自动同步，见上文已知限制）。
+
+### 启动顺序
+
+sidecar 依赖平台先就绪（否则回调失败）。`ROLE=sidecar` 的 entrypoint 在起
+sidecar 前会轮询 `AI_FLASK_URL/login` 可达（最多 30s，超时退出）。建议先起
+平台容器，再起 sidecar 容器。
+
+### 健康检查
+
+- 平台 `GET /healthz`：`{"ok":true,"backend":"json|postgres","sidecar":"reachable|unreachable"}`。
+  `sidecar` 字段只上报可达性，**不可达不导致 503**（platform 角色无 sidecar 也健康）。
+- sidecar `GET /healthz`：`{"ok":true}`（已有）。
+- 降级可观测：平台 `/api/admin/plugins` 列表项的 `health` 字段 = sidecar 可达性快照
+  （reachable/unreachable），替代此前的占位 "unknown"。
+
 ## PostgreSQL 模式（Stage 3b-3）
 
 Stage 3b 把存储层从 JSON 文件迁到 PostgreSQL（最终唯一存储，决策 #8）。过渡期
@@ -165,7 +255,8 @@ python3 scripts/migrate_json_to_pg.py rollback --backup-dir <备份目录> --yes
   需手工把新明文写回 sidecar 可见的文件（或更新 env）并重启 sidecar。当前 demo 里
   Flask 与 sidecar 同容器同卷（`SHARE_DATA_DIR` 共享），故引导写入的文件天然对
   sidecar 可见、无感；一旦二者拆开（不同容器/主机），轮换后必须同步更新 sidecar
-  侧的凭证来源。
+  侧的凭证来源。插件管理 UI（owner）点轮换后会把新明文**展示一次**并提供复制按钮 +
+  分发到 sidecar 容器 env 的提示。
 
 ## 已知待办
 
