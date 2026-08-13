@@ -21,12 +21,18 @@
 - api_protocol: openai；window_tier: balanced（400k/15%/1024·1280·768）
 - 修改入口：`PUT http://<host>:8000/api/ai/config`
 
+## 公网入口（2026-08-13 已通）
+
+- **`http://117.72.24.99:41083`** ← jdcloud frps-web（allowPorts 已加 41083，`frps-web.toml.bak.add41083_*` 备份）← homePC frpc-svs-demo（TCP 47001）← 容器 18080。
+- frpc 配置：`~/.config/frp/frpc-svs-demo.toml`（nohup 后台跑，未做 systemd——重启 homePC 后需手动拉起，记入待办）。
+
 ## 已知待办
 
-1. **frp 公网入口（阻塞，等 sudo）**：jdcloud（117.72.24.99）frps-web 的 `allowPorts` 白名单只有 `[41081, 41082, 45495]`，新增高位端口需要 `sudo` 改 `/etc/frp/frps-web.toml` + 重启 frps-web，再在 homePC 起对应 frpc 隧道。主 frps（47000）是 QUIC-only，已被电信 UDP QoS 限速（这就是 46450 时断时续的根因）。
-2. **docker_entry.sh PORT 硬编码**：gunicorn 写死 8000，`PORT` env 无效；改 `-b 0.0.0.0:${PORT:-8000}` 后重建镜像。
+1. **frpc-svs-demo 未纳入 systemd**：homePC 重启后 frp 隧道不自动恢复（其余 frpc 实例同为 nohup，习惯一致；可后续统一改 systemd user unit）。
+2. **docker_entry.sh PORT**：已修（gunicorn 尊重 PORT env，`d96968a`）。
 3. **CPA 本地监听 127.0.0.1**：host 网络是当前的解法；若改回 bridge 网络需让 CPA 监听局域网或加 proxy 进程。
-4. 重建命令：`rsync 工作区 → homePC:~/svs-viewer-demo && podman build -t svs-viewer-demo:latest ~/svs-viewer-demo && podman rm -f svs-viewer-demo && podman run -d --name svs-viewer-demo --network host -v ~/svs-viewer-demo-data/uploads:/data/uploads -v ~/svs-viewer-demo-data/share:/data/share --restart unless-stopped svs-viewer-demo:latest`
+4. **模型**：demo 现用 MiniMax-M3（快、不限流）。luna 限流恢复后如需换回，`PUT http://127.0.0.1:18080/api/ai/config {"model":"gpt-5.6-luna"}`。
+5. 重建命令：`rsync 工作区 → homePC:~/svs-viewer-demo && podman build -t svs-viewer-demo:latest ~/svs-viewer-demo && podman rm -f svs-viewer-demo && podman run -d --name svs-viewer-demo --network host -v ~/svs-viewer-demo-data/uploads:/data/uploads -v ~/svs-viewer-demo-data/share:/data/share --restart unless-stopped -e PORT=18080 svs-viewer-demo:latest`
 
 ## 验证记录
 
