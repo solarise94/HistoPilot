@@ -25,7 +25,7 @@
 
 ## 公网入口（当前不可用于带密码测试）
 
-- **`http://117.72.24.99:41083` 是明文 HTTP**：登录密码和 session cookie 无传输层保护。匿名 401 已生效，但强密码不能防止链路窃听或中间人攻击。
+- **`http://<demo-host>:41083` 是明文 HTTP**：登录密码和 session cookie 无传输层保护。匿名 401 已生效，但强密码不能防止链路窃听或中间人攻击。
 - 链路：jdcloud frps-web（allowPorts 已加 41083）← homePC frpc-svs-demo（TCP 47001）← 容器 18080。
 - frpc 配置：`~/.config/frp/frpc-svs-demo.toml`（nohup 后台跑，未做 systemd——重启 homePC 后需手动拉起）。
 - **公网测试 GO 条件**：先套 HTTPS，或改走 SSH/VPN/Tailscale 等可信隧道。在此之前不要用 41083 登录。
@@ -324,7 +324,7 @@ demo 当前拓扑（终态）：
   均 rm -f + run 重建（podman restart 不吃新镜像，老坑）。
 - 平台容器新增 `-e SAMPLE_PLUGIN_ENABLED=1`：示例插件面板在 demo 默认开启，
   便于验收「非 HistoPilot 最小插件」；关闭去掉该 env 重建即可。
-- 烟雾（公网 http://117.72.24.99:41083 全链路）：
+- 烟雾（公网 http://<demo-host>:41083 全链路）：
   - /healthz ok（backend=postgres，sidecar=reachable）；sidecar /healthz ok；
   - 插件资产 200：histopilot/ui/main.js、sample-annotator/ui/main.js、
     sdk/ui/bridge-client.js、sample-annotator/ui/index.html（.html 白名单）、
