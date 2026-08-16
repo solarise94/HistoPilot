@@ -139,7 +139,12 @@ podman run -d --name svs-platform \
 **sidecar 容器**（`ROLE=sidecar`，只 sidecar）。需要：
 - `AI_FLASK_URL` 指向平台容器的可达地址（host 网络下即 `http://127.0.0.1:18080`）；
 - `PLUGIN_INSTALLATION_ID` / `PLUGIN_HISTOPILOT_SECRET`（或挂载平台凭证文件）——见下节；
-- `AI_SESSIONS_DIR` 指向 sidecar 专属卷。
+- `AI_SESSIONS_DIR` 指向 sidecar 专属卷；
+- `AI_SIDECAR_HOST=127.0.0.1`（host 网络下必须 loopback；镜像缺省已是 127.0.0.1。
+  **不要**设 `0.0.0.0`：sidecar 的 `/run`、`/sessions`、`/cancel` 等只靠内部
+  token，绑宿主网卡会把通道暴露出去）；
+- `AI_INTERNAL_TOKEN` 与平台容器相同（平台 `SHARE_DATA_DIR/ai_internal.token`
+  或 admin.env）。Flask 代理 `/api/ai/*` 会带 `X-AI-Internal-Token`。
 
 ```sh
 podman run -d --name svs-sidecar \
@@ -147,12 +152,19 @@ podman run -d --name svs-sidecar \
   -v ~/svs-viewer-demo-data/sidecar-sessions:/data/sidecar-sessions \
   --restart unless-stopped \
   -e ROLE=sidecar \
+  -e AI_SIDECAR_HOST=127.0.0.1 \
   -e AI_FLASK_URL=http://127.0.0.1:18080 \
   -e AI_SESSIONS_DIR=/data/sidecar-sessions \
+  -e AI_INTERNAL_TOKEN=<same-as-platform> \
   -e PLUGIN_INSTALLATION_ID=pin_xxxx \
   -e PLUGIN_HISTOPILOT_SECRET=<secret-from-platform> \
   svs-viewer-demo:latest
 ```
+
+跨容器若改用**私有 podman 网络**（非 host）：sidecar 可设 `AI_SIDECAR_HOST=0.0.0.0`
+以便平台容器按容器名访问，但**不要** `-p 8055:8055` 发布到宿主，且**必须**配置
+`AI_INTERNAL_TOKEN`。漏配时 sidecar **拒绝启动**（非 loopback + 空 token fail-closed），
+不会在容器网络里裸奔。本地 loopback 开发仍可无 token 启动。
 
 ### 凭证从哪来
 
@@ -165,6 +177,10 @@ podman run -d --name svs-sidecar \
 podman exec svs-platform cat /data/share/plugin-secret-histopilot.txt
 # 把 JSON 里的 installation_id / secret 填到 sidecar 容器的
 # PLUGIN_INSTALLATION_ID / PLUGIN_HISTOPILOT_SECRET env 后启动。
+
+# 同步内部 token（Flask → sidecar /run 等入站鉴权）：
+podman exec svs-platform cat /data/share/ai_internal.token
+# 填到 sidecar 的 AI_INTERNAL_TOKEN。
 ```
 
 平台侧「插件管理」UI 里点「轮换凭证」后，新明文**只展示一次**，同样需要手工
