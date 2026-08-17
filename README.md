@@ -19,6 +19,13 @@ npm run build
 npm test
 ```
 
+跨仓配置契约由单独测试锁定；本地把 PathTogether checkout 路径传入即可，
+GitHub Actions 会自动同时 checkout 两个仓库：
+
+```bash
+PATHTOGETHER_REPO=../PathTogether npm run test:contract
+```
+
 启动前需要一个可访问的 PathTogether 实例，以及由平台生成的 installation credential：
 
 ```bash

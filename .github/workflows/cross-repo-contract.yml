@@ -1,0 +1,50 @@
+name: Cross-repository config contract
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  config-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out HistoPilot
+        uses: actions/checkout@v4
+        with:
+          path: HistoPilot
+
+      - name: Check out PathTogether
+        uses: actions/checkout@v4
+        with:
+          repository: solarise94/PathTogether
+          path: PathTogether
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: HistoPilot/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: PathTogether/requirements.txt
+
+      - name: Install HistoPilot dependencies
+        working-directory: HistoPilot
+        run: npm ci
+
+      - name: Install PathTogether dependencies
+        run: python -m pip install -r PathTogether/requirements.txt
+
+      - name: Verify Flask to HistoPilot config chain
+        working-directory: HistoPilot
+        env:
+          PATHTOGETHER_REPO: ${{ github.workspace }}/PathTogether
+        run: npm run test:contract

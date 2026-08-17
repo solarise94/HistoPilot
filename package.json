@@ -22,6 +22,7 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js",
     "test": "vitest run",
+    "test:contract": "vitest run test/config-chain.integration.test.ts",
     "spike": "tsx scripts/spike.ts",
     "bundle:pathtogether": "node scripts/package-pathtogether-plugin.mjs",
     "prepack": "npm run build"
