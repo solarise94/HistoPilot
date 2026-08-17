@@ -1,0 +1,39 @@
+{
+  "name": "@solarise94/histopilot",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "Agentic navigation service for whole-slide pathology images",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/solarise94/HistoPilot.git"
+  },
+  "files": [
+    "dist/",
+    "integrations/pathtogether/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "spike": "tsx scripts/spike.ts",
+    "bundle:pathtogether": "node scripts/package-pathtogether-plugin.mjs",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.84.0",
+    "@earendil-works/pi-ai": "0.84.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^3.2.7"
+  }
+}

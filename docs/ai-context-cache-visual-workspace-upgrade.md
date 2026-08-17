@@ -1,5 +1,7 @@
 # AI 上下文缓存与视觉工作区升级设计
 
+> 历史设计与实验记录：拆仓后实现位于仓库根目录的 `src/`、`test/` 与 `experiments/`。当前使用说明以 [README](../README.md) 为准。
+
 > 状态：Phase 1–3 已实现（Phase 0 基线已固化；Phase 4 A/B 准备中——Wave 1 数据面与 Wave 2 执行 runner（scripted 模式可用）已落地于 `sidecar/experiments/`，正式采数仍 NO-GO，见 §14）
 > 版本：v1.2
 > 日期：2026-08-10

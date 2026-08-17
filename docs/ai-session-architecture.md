@@ -1,5 +1,7 @@
 # AI 读片助手 · 架构文档（pi sidecar 迁移后）
 
+> 历史架构记录：本文描述拆仓前的一体化部署，路径与环境变量可能仍使用 `sidecar/`、`AI_*`。当前启动与部署方式以仓库根目录 [README](../README.md) 为准。
+
 > 状态：**已实施**。本文档描述 pi 迁移（Step 1–6）完成后的实际架构。
 > 实现位置：`sidecar/`（Node + pi 0.84.0）、`app.py`（Flask 代理层）、
 > `docker_entry.sh`（双进程容器入口）。
